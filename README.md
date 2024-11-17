@@ -1,4 +1,4 @@
-#IAP dependency of T-cell prolymphocytic leukemia identified by high-throughput drug screening.
+# IAP dependency of T-cell prolymphocytic leukemia identified by high-throughput drug screening.
 
 This Git repository contains the codes for reproducing the bioinformatic analysis results and figures included in the manuscript "IAP dependency of T-PLL identified by high-throughput drug screening" by Pohly et al.
 
