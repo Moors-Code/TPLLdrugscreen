@@ -1,0 +1,573 @@
+---
+title: "Figure 3"
+author: "M. Pohly"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Load libraries
+```{r warning=FALSE, message=FALSE}
+library(tidyverse)
+library(scran)
+library(scater)
+library(gprofiler2)
+library(gridExtra)
+library(ComplexHeatmap)
+library(circlize)
+library(edgeR)
+library(readxl)
+library(ggrepel)
+library(tftargets)
+library(network)
+library(ggnet)
+library(parallel)
+library(BiocParallel)
+library(ggsci)
+library(airr)
+library(numbat)
+library(scales)
+
+ncores <- 10
+mcparam <- MulticoreParam(workers=ncores)
+register(mcparam)
+
+```
+
+## Define variables
+```{r}
+opt <- list()
+opt$pathinfo <- "misc/pathways_2.xlsx"
+opt$scebulk <- "data/submission/RNA_complete.RDS"
+opt$plot <- "plots/Fig3/"
+
+
+## Set theme
+lgd <-  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5), 
+        text = element_text(size = 15),
+        panel.background = element_rect(fill = "transparent",colour = NA),
+        plot.background = element_rect(fill = "transparent",colour = NA), 
+        legend.background = element_rect(fill='transparent',colour = NA), 
+        strip.background = element_blank(), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+```
+
+## Load data
+```{r}
+## SCE
+sce <- readRDS(opt$scebulk)
+sce
+
+## Pathway information
+path.info <- read_excel(opt$pathinfo)
+```
+
+## Analysis
+#### Perform differential gene expression testing
+```{r}
+
+testTreat <- unique(sce$Treatment)
+
+de.res <- mclapply("DMSO", mc.cores = ncores, 
+                 function(z) {
+                   
+  message(paste0("Fitting model for ", z))
+                   
+  compDrug <- testTreat[testTreat != z] # instead of subtypes we use other treatments here
+                   
+  mclapply(compDrug, mc.cores = ncores, 
+         function(x) {
+    message(paste0("Drug ", x))
+    summed <- sce#[hvgenes, ]
+    colData(summed)$Treatment <- factor(colData(summed)$Treatment, levels = c(z, compDrug))
+    y <- DGEList(counts(summed), samples = colData(summed))
+    design <- model.matrix(~0 + factor(patientID) + Treatment, y$samples) # set coefficient (name or matrix column) - fig. 7 f1000
+    keep <- filterByExpr(y, design = design)
+    y <- y[keep,]
+    summary(keep)
+    message(paste0("Keeping ", sum(keep), " genes"))
+    y <- calcNormFactors(y)
+    y <- estimateDisp(y, design) # gene-wise dispersion (variance on top of poisson distribution)
+    plotBCV(y)
+    fit <- glmQLFit(y, design, robust = TRUE) # QL way of fitting the model
+    plotQLDisp(fit)
+    res <- glmQLFTest(fit, coef = paste0("Treatment", x))
+    summary(decideTests(res))
+    resTab <- res$table
+    resTab$gene <- rownames(resTab)
+    resTab <- resTab %>% mutate(p.adj = p.adjust(PValue, method = "BH")) #%>%
+      #mutate(p.adj = ifelse(p.adj < 1e-12, 1e-12, p.adj))
+    resTab$Treatment <- x
+    resTab$Control <- z
+    resTab %>% arrange(desc(logFC))
+  }) %>% bind_rows()
+}) %>% bind_rows()
+
+de.res <- de.res %>%
+  left_join(select(data.frame(rowData(sce)), ID, Symbol), c("gene" = "ID"))
+
+de.res %>% filter(Treatment == "Selinexor", Symbol %in% c("BCL2", "TP53"))
+#write.csv(de.res, opt$deres)
+
+```
+
+#### Show the number of DEG
+```{r fig.height= 6, fig.width=7.5, message=FALSE, warning=FALSE}
+sigTab <- de.res %>%
+  group_by(Treatment) %>%
+  filter(p.adj < 0.1) %>%
+  filter(logFC > 0.25 | logFC < -0.25) %>%
+  mutate(dir = ifelse(logFC > 0, "Up", "Down")) %>%
+  dplyr::count(dir) %>%
+  dplyr::rename(Direction = dir) %>%
+  ungroup()
+
+drugOrder <- sigTab %>%
+  group_by(Treatment) %>%
+  summarise(allDEG = sum(n)) %>%
+  arrange(desc(allDEG)) %>%
+  pull(Treatment)
+
+sigTab <- sigTab %>%
+  mutate(Treatment = factor(Treatment, levels = drugOrder), 
+         n = ifelse(Direction == "Down", n * -1, n))
+
+p <- sigTab %>%
+  ggplot(aes(x = Treatment, y = n, fill = Direction)) +
+  geom_bar(stat = "identity", colour = "black") +
+  geom_text(aes(label = n), data = sigTab[sigTab$Direction == "Up", ], size = 5, nudge_y = 200) +
+  geom_text(aes(label = n), data = sigTab[sigTab$Direction == "Down", ], size = 5, nudge_y = -200) +
+  xlab("") + ylab("Number of Genes") +
+  ggtitle("Significantly Differentially Expressed Genes") +
+  lgd + scale_fill_manual(values = c("Up" = "#F44336", "Down" = "#1976D2")) +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1), 
+        plot.title = element_text(size = 21, vjust = 1), 
+        axis.text = element_text(size = 17.5), 
+        text = element_text(size = 22.5), 
+        panel.border = element_rect(linewidth = 1))
+p
+ggsave(plot = p, filename = paste0(opt$plot, "n_deg.png"), 
+       height = 17.5, width = 22, units = "cm")
+
+```
+
+#### Construct a network of differentially expressed genes
+```{r fig.height= 12.5, fig.width=12.5, message=FALSE, warning=FALSE}
+# Assign nodes (treatments) and edges (5% FDR DEGs)
+plotMat <- de.res %>% filter(p.adj < 0.1) %>%
+  filter(logFC > 0.25 | logFC < -0.25)
+allTreat <- unique(plotMat$Treatment)
+target <- data.frame(Treatment = allTreat,
+                     target = c("Autophagyi", "IAPi", "HDACi", "mTORi", "ITKi", "TLR8a", "MDM2i", 
+                                "IMID", "JAKi", "XPOi", "BCL2i"))
+
+opt$sub <- FALSE
+
+if(opt$sub == TRUE) {
+  plotMat <- de.res %>% filter(p.adj < 0.1, !Treatment %in% c("Pomalidomide", "Dacinostat")
+                             ) %>%
+  filter(logFC > 0.25 | logFC < -0.25) #%>%
+    #filter(logFC < -0.25)
+} else {
+  plotMat <- de.res %>% filter(p.adj < 0.1) %>%
+    filter(logFC > 0.25 | logFC < -0.25) #%>%
+    #filter(logFC > 0.25)
+}
+
+
+allTreat <- unique(plotMat$Treatment)
+
+nodes <- data.frame(Treatment = allTreat)
+edges <- plotMat %>% select(Treatment, Symbol) %>%
+  mutate(Treatment = as.character(Treatment))
+
+# Create network object
+set.seed(100)
+net <- network(edges, directed = TRUE)
+netTab <- ggnet2(net)$data |> 
+  mutate(Type = ifelse(label %in% allTreat, "Treatment", "Symbol"),
+         Treatment = ifelse(Type == "Treatment", label, NA)) |> 
+  select(-alpha,-color,-shape,-size) |> 
+  mutate(x = as.numeric(x), y = as.numeric(y))
+  
+# Define edges based on direction and padj of DEGs
+from <- edges %>%
+  left_join(netTab, by = c("Treatment" = "label")) %>% dplyr::select(Treatment, x, y) %>%
+  dplyr::rename(x_start = x, y_start = y) |> distinct()
+
+to <- edges %>%
+  left_join(netTab, by = c("Symbol" = "label")) %>% dplyr::select(Symbol,x,y) %>%
+  dplyr::rename(x_end = x, y_end = y) |> distinct()
+
+edges <- edges %>% left_join(from) %>% left_join(to) %>%
+  left_join(plotMat %>% select(Symbol,Treatment,logFC,p.adj)) %>%
+  distinct() %>%
+  mutate(Direction = ifelse(logFC < 0,"Down","Up"),
+         alpha = -log10(p.adj)
+         #alpha = rescale(-log10(p.adj#squish(p.adj, c(1.812407e-209,1))))
+         )
+
+# Create auxiliary table for annotation
+
+n_DEG <- plotMat %>% #filter(!Treatment %in% c("Pomalidomide", "BafilomycinA1", "Dacinostat")) %>%
+  group_by(Treatment) %>%
+  filter(p.adj < 0.1) %>%
+  filter(logFC > 0.25 | logFC < -0.25) %>% 
+  dplyr::count() %>% ungroup()
+
+netTabAnno <- netTab |> 
+  left_join(target) |> 
+  left_join(n_DEG) |> 
+  mutate(Treatment = factor(Treatment, levels = allTreat))
+
+p <- ggplot()  +
+  geom_curve(data = edges,
+               aes(x = x_start, xend = x_end, y = y_start, yend = y_end, col = Direction, alpha = p.adj),
+               linewidth = 0.1, curvature = 0.05) +
+  geom_point(data = netTabAnno[netTabAnno$Type == "Symbol",],
+             aes(x = x, y = y),
+             size = 0.5, shape = 21, color = "grey60", fill = "grey95", stroke = 0.75, alpha = 0.6) +
+  geom_point(data = netTabAnno[netTabAnno$Type == "Treatment",],
+             aes(x = x, y = y, fill = Treatment, size = n), shape = 21, stroke = 0.75) +
+  # scale_fill_manual(values = col_TX) +
+  scale_size_continuous(name = "Number of DEGs",
+                        breaks = seq(0, max(n_DEG$n), by = 1000), limits = c(0, max(n_DEG$n)), range = c(0.5,7.5)) +
+  scale_color_manual(values = c("Up" = "#F44336", "Down" = "#1976D2")) +
+  scale_alpha_continuous() +
+  geom_label_repel(data = netTabAnno |> filter(Type == "Treatment"),
+                  aes(x = x, y = y, label = Treatment, fill = Treatment, point.size = rescale(n, to = c(0.5,7.5))),
+                  max.overlaps = Inf, vjust = "bottom", nudge_y = -0.001, fontface = "bold", alpha = 0.7, #direction = "y", 
+                  show.legend = FALSE, size = 5)  +
+  guides(color = guide_legend(ncol = 2, override.aes = list(linewidth=2.5)),
+         size = guide_legend(ncol = 2),
+         alpha = guide_legend(override.aes = list(linewidth=2.5)),
+         fill = guide_legend(override.aes = list(size=3.5))) +
+  xlab("") + ylab("") + ggtitle("Network of Differentially Expressed Genes") +
+  lgd +
+  theme(axis.ticks = element_blank(), 
+        axis.text = element_blank(), 
+        panel.border = element_rect(linewidth = 1, colour = NA, fill = "transparent")) +
+  scale_fill_manual(values = c("Venetoclax" = "grey70", "Birinapant" = "#AD1457", "Nutlin-3a" = "#FFA000", 
+                                "Ibrutinib" = "#283593", "Everolimus" = "#43A047", "Selinexor" = "#FFD45F",
+                               "BafilomycinA1" = "#F8BBD0", "Motolimod" = "#AB47BC", "Dacinostat" = "#F44336", 
+                                "Dacinostat" = "#64B5F6", "Pomalidomide" = "#80DEEA", "Ruxolitinib" = "#4DB6AC"))
+
+p
+if(opt$sub == TRUE) {
+ ggsave(plot = p, filename = paste0(opt$plot, "deg_subnetwork.png"),
+       height = 20, width = 25, units = "cm")
+} else {
+  ggsave(plot = p, filename = paste0(opt$plot, "deg_network.png"),
+       height = 20, width = 25, units = "cm")
+}
+
+
+```
+
+#### Volcano plots
+```{r fig.height= 5.5, fig.width=5.5}
+
+pList <- lapply(c("Birinapant", "Selinexor", "Nutlin-3a"), function(x) {
+  
+  if(x %in% c("Motolimod", "Everolimus", "Ibrutinib", "BaflimoycinA1")) {
+    geneSelec <- path.info %>% filter(pathway %in% c("NFKB", "NFKB_Chemo", "NFKB_GF", "NFKB_TF", "NFKB_Apo", "TNF", "TLR")) %>% select(gene) %>% unlist() %>% as.vector()
+  } else if(x %in% c("Birinapant")) {
+    geneSelec <- path.info %>% filter(pathway %in% c("NFKB", "NFKB_Chemo", "NFKB_GF", "NFKB_TF", "NFKB_Apo", "TNF")) %>% select(gene) %>% unlist() %>% as.vector()
+  } else if(x %in% c("Nutlin-3a", "Selinexor")) {
+    geneSelec <- path.info %>% filter(pathway %in% c("TP53up")) %>% select(gene) %>% unlist() %>% as.vector()
+    geneSelec <- c("TP53", geneSelec)
+
+  } else if(x %in% c("Everolimus")) {
+    geneSelec <- path.info %>% filter(pathway %in% c("NFKB", "NFKB_Chemo", "NFKB_GF", "NFKB_TF", "NFKB_Apo", "TNF", "TLR")) %>% select(gene) %>% unlist() %>% as.vector()
+  }
+  
+  volTab <- de.res %>% filter(Treatment == x)
+  #volTab <- de.res.2020 %>% filter(Treatment == x, celltype == "T-PLL") %>% dplyr::rename(Symbol = gene)
+  
+  ## Define limits  
+  minLim <- -1 * max(abs(de.res$logFC))
+  maxLim <- max(abs(de.res$logFC))
+  thresh <- 0.25
+
+  volTab$diffCol <- NA
+  volTab[volTab$logFC > 0 & volTab$p.adj < 0.1 & volTab$logFC > thresh, "diffCol"] <- "sigUp"
+  volTab[volTab$logFC < 0 & volTab$p.adj < 0.1 & volTab$logFC < -thresh, "diffCol"] <- "sigDown"
+  volTab[volTab$p.adj >= 0.1, "diffCol"] <- "ns"
+  volTab[volTab$logFC < thresh & volTab$logFC > -(thresh), "diffCol"] <- "ns"
+  
+  p <- volTab %>%
+    mutate(logFC = ifelse(logFC > maxLim, maxLim, logFC)) %>%
+    mutate(logFC = ifelse(logFC < minLim, minLim, logFC)) %>%
+    #filter(gene %in% geneSelec) %>%
+    filter(Treatment == x) %>%
+    ggplot(aes(x = logFC, y = -log10(p.adj), fill = diffCol)) +
+    geom_point(shape = 21, size = 2) + xlab("Log2FC") + ylab("-Log10(p.adj)") + ggtitle(paste0(x)) +
+    #xlim(minLim, maxLim) +
+    geom_hline(yintercept = -log10(0.1), linetype = "dashed") +
+    geom_vline(xintercept = -thresh, linetype = "dashed") + geom_vline(xintercept = thresh, linetype = "dashed") +
+    geom_label_repel(data = filter(volTab, Symbol %in% c(geneSelec), Treatment %in% x, p.adj < 0.1, 
+                                 logFC > thresh | logFC < -(thresh)), aes(label = Symbol), fill = "white", 
+                    nudge_y = 0.25, size = 4, max.overlaps = getOption("ggrepel.max.overlaps", default = 30), 
+                     segment.linetype = 2, force = 20, alpha = 0.8) +
+    scale_fill_manual(values = c("sigUp" = "#F44336", "sigDown" = "#1976D2", "ns" = "grey")) +
+    theme_classic() +
+    theme(plot.title = element_text(hjust = 0.5), 
+          legend.position = "none", 
+          text = element_text(size = 17.5), 
+          axis.text = element_text(size = 15),
+          panel.background = element_rect(fill = "transparent",colour = NA),
+          plot.background = element_rect(fill = "transparent",colour = NA),
+          legend.background = element_rect(fill='transparent'),
+          strip.background = element_blank())
+  
+   ggsave(plot = p, filename = paste0(opt$plot, "vol_", x, ".png"),
+          height = 15, width = 15, unit = "cm")
+  p
+
+})
+pList 
+
+geneSelec <- path.info %>% filter(pathway %in% c("NFKB", "NFKB_Chemo", "NFKB_GF", "NFKB_TF", "NFKB_Apo", "TNF", "TLR")) %>% select(gene) %>% unlist() %>% as.vector()
+
+geneSub <- lapply(unique(de.res$Treatment), function(x) {
+  de.res %>% 
+    filter(Treatment == x) %>%
+    filter(p.adj < 0.1) %>%
+    filter(logFC > 0.25 | logFC < -0.25) %>%
+    pull(Symbol)
+  
+}) %>% unlist() %>% unique()
+
+geneSub <- intersect(geneSelec, geneSub)
+
+plotMat.wide <- de.res %>% 
+  mutate(logFC = ifelse(p.adj >= 0.1, 0, logFC)) %>%
+  dplyr::select(Symbol, Treatment, logFC) %>% 
+  filter(Symbol %in% geneSub) %>%
+  dplyr::rename(log2FC = logFC) %>%
+  pivot_wider(names_from = "Treatment", values_from = "log2FC") %>%
+  column_to_rownames("Symbol")
+
+geneOrder <- rownames(plotMat.wide)[hclust(dist(plotMat.wide), method = "ward.D2")$order]
+
+```
+
+#### Dot plot
+```{r fig.height= 6, fig.width=25}
+p <- de.res %>% filter(#Treatment %in% c("Birinapant", "Motolimod"),
+  Symbol %in% geneSub) %>%
+  filter(p.adj < 0.1) %>%
+  mutate(pSign = -log10(p.adj) * sign(logFC),
+         p.adj = ifelse(-log10(p.adj) > 5, 5, -log10(p.adj)), 
+         Symbol = factor(Symbol, levels = geneOrder)) %>%
+  dplyr::rename(log2FC = logFC) %>%
+  ggplot(aes(x = Symbol, y = Treatment)) +
+  geom_point(aes(size = p.adj, fill = log2FC), shape = 21) +
+  xlab("") + ylab("") + ggtitle("Effect on TNF-NFkB and TLR Target Genes") +
+  lgd +
+  scale_fill_gradient2(high = "#F44336", low = "#1976D2", name = "log2FC",
+                       limits=c(-2, 2), oob=squish) +
+  scale_size_continuous(name = "-Log10(p.adj)",
+                        breaks = seq(0, 5, by = 2.5),
+                        limits = c(0, 5), #range = c(0.5,7.5)
+                        ) +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1),
+        text = element_text(size = 12.5),
+        panel.border = element_rect(linewidth = 1))
+p
+ggsave(plot = p, filename = paste0(opt$plot, "biri_moto_nfkb.png"),
+       height = 9, width = 50, units = "cm")
+```
+
+
+#### GSEA
+```{r message=FALSE, warning=FALSE}
+
+go.df.merge <- mclapply(c("Birinapant", "Motolimod", "Selinexor", "BafilomycinA1", "Dacinostat", "Pomalidomide", "Ibrutinib", 
+                        "Everolimus", "Venetoclax", "Ruxolitinib", "Nutlin-3a"), mc.cores = ncores, 
+                      function(compTreat) {
+    message(paste("Running gprofiler for", compTreat, sep = " "))
+    sigUp <- de.res %>% filter(logFC > 0.25, Treatment == compTreat, 
+                               #!gene %in% c(drugOther), 
+                               p.adj <= 0.1) %>% arrange(desc(logFC))
+    #sigUp <- de.res %>% filter(celltype == compType, logFC > 0.25, Treatment == compTreat, p.adj <= 0.05) %>% arrange(PValue)
+    
+    sigUp
+    if(nrow(sigUp) > 1) {
+      gostresUp <- gost(query = sigUp$gene,
+                        organism = "hsapiens", ordered_query = TRUE,
+                        multi_query = FALSE, significant = TRUE, exclude_iea = FALSE,
+                        measure_underrepresentation = FALSE, evcodes = FALSE,
+                        user_threshold = 0.1, correction_method = "fdr",
+                        domain_scope = "annotated", custom_bg = NULL,
+                        numeric_ns = "", sources = NULL, as_short_link = FALSE)
+      gostresUp$result
+
+      go.df.up <- gostresUp$result %>% arrange(p_value)
+      go.df.up$rank <- 1:nrow(go.df.up)
+      go.df.up$type <- "Up"
+    } else {
+      go.df.up <- data.frame(p_value = NA, rank = NA, type = "Up", source = NA, term_name = NA, 
+                               intersection_size = 10)
+    }
+
+    sigDown <- de.res %>% filter(logFC < -(0.25), Treatment == compTreat,
+                                 #!gene %in% c(drugOther),
+                                  p.adj <= 0.1) %>% arrange(logFC)
+    #sigDown <- de.res %>% filter(celltype == compType, logFC < -(0.25), Treatment == compTreat, p.adj <= 0.05) %>% arrange(PValue)
+    if(nrow(sigDown) > 1) {
+    gostresDown <- gost(query = sigDown$gene,
+                        organism = "hsapiens", ordered_query = TRUE,
+                        multi_query = FALSE, significant = TRUE, exclude_iea = FALSE,
+                        measure_underrepresentation = FALSE, evcodes = FALSE,
+                        user_threshold = 0.1, correction_method = "fdr",
+                        domain_scope = "annotated", custom_bg = NULL,
+                        numeric_ns = "", sources = NULL, as_short_link = FALSE)
+
+    gostresDown$result
+
+    go.df.down <- gostresDown$result %>% arrange(p_value)
+    go.df.down$rank <- 1:nrow(go.df.down) * -1
+    go.df.down$type <- "Down"
+    } else {
+      go.df.down <- data.frame(p_value = NA, rank = NA, type = "Down", source = NA, term_name = NA, 
+                               intersection_size = 10)
+    }
+
+    go.df.merge <- rbind(go.df.up, go.df.down)
+    go.df.merge$Treatment <- compTreat
+
+    go.df.merge <- go.df.merge %>% filter(!intersection_size < 10) %>% 
+      filter(!source %in% c("CORUM", "TF", "MIRNA")) %>%
+      mutate(p.adj = p.adjust(p_value, method = "BH"))
+    
+    if(nrow(go.df.merge) < 1) {
+      go.df.merge <- data.frame(p_value = NA, rank = NA, type = "Down", source = NA, term_name = NA, 
+                               intersection_size = 0)
+    } else {
+      go.df.merge
+    }
+}) %>% bind_rows() 
+
+
+```
+
+#### Show number of enriched gene-sets
+```{r  fig.height= 6, fig.width=7.5}
+#### Show number of enriched gene sets
+sigTab <- go.df.merge %>%
+  dplyr::count(Treatment, type) %>%
+  dplyr::rename(Direction = type) %>%
+  mutate(n = ifelse(Treatment %in% c("Ruxolitinib", "Venetoclax"), 0, n)) %>%
+  mutate(Treatment = factor(Treatment, levels = drugOrder), 
+         n = ifelse(Direction == "Down", n * -1, n)) %>%
+  filter(!is.na(Treatment))
+
+naTab <- data.frame(Treatment = c("Venetoclax", "Venetoclax", "Selinexor"), 
+                    Direction = c("Down", "Up", "Down"), 
+                    n = c(0, 0, 0))
+sigTab <- rbind(sigTab, naTab)
+
+p <- sigTab %>%
+  ggplot(aes(x = Treatment, y = n, fill = Direction)) +
+  geom_bar(stat = "identity", colour = "black") +
+  geom_text(aes(label = n), data = sigTab[sigTab$Direction == "Up", ], size = 5, nudge_y = 200) +
+  geom_text(aes(label = n), data = sigTab[sigTab$Direction == "Down", ], size = 5, nudge_y = -200) +
+  xlab("") + ylab("Number of Gene Sets") +
+  ggtitle("Significantly Enriched Gene Sets") +
+  lgd + scale_fill_manual(values = c("Up" = "#F44336", "Down" = "#1976D2")) +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1), 
+        plot.title = element_text(size = 21, vjust = 1), 
+        axis.text = element_text(size = 17.5), 
+        text = element_text(size = 22.5), 
+        panel.border = element_rect(linewidth = 1))
+p
+ggsave(plot = p, filename = paste0(opt$plot, "n_gsea.png"), 
+       height = 17.5, width = 22, units = "cm")
+
+```
+
+#### Make dot plot
+```{r fig.height= 9.5, fig.width=25, message=FALSE, warning=FALSE}
+## Exclude all terms that are up and downregulated by a single-drug
+dblTerm <- go.df.merge %>% 
+  filter(!intersection_size < 10) %>%
+  filter(!source %in% c("CORUM", "TF", "MIRNA")) %>%
+  mutate(term_name = paste0(source, "_", term_name)) %>% unique() %>%
+  #filter(term_name %in% unique(termTab$term_name)) %>%
+  dplyr::count(term_name, Treatment) %>%
+  filter(n > 1) %>%
+  pull(term_name) %>% unique()
+
+## Keep the top20 of each compound
+nTop <- 5
+termTab <- lapply(c("Selinexor", "Nutlin-3a", "Venetoclax", "Birinapant", "Ibrutinib", "Motolimod", 
+                    "Dacinostat", "Pomalidomide", "Everolimus"), function(y) {
+  termTab <- lapply(c("Up", "Down"), function(z) {
+    message(y)
+    message(z)
+      
+    gseaTab <- go.df.merge %>% filter(type == z, Treatment == y) %>% 
+      filter(!intersection_size < 10) %>%
+      filter(!source %in% c("CORUM", "TF", "MIRNA")) %>%
+      mutate(term_name = paste0(source, "_", term_name)) %>% unique() %>%
+      filter(!term_name %in% dblTerm)
+      
+    gseaTab <- gseaTab[1:nTop, ] # get only top enrichments
+      
+    #termOrder <- gseaTab %>% arrange(desc(p_value)) %>% pull(term_name)
+      
+    gseaTab <- gseaTab %>%
+      mutate(p.adj = p.adjust(p_value, method = "BH")) 
+  }) %>% bind_rows()
+}) %>% bind_rows()
+
+gseaTab <- go.df.merge %>% 
+  filter(!intersection_size < 10) %>%
+  filter(!source %in% c("CORUM", "TF", "MIRNA")) %>%
+  mutate(term_name = paste0(source, "_", term_name)) %>% unique() %>%
+  filter(term_name %in% unique(termTab$term_name)) %>%
+  filter(!term_name %in% dblTerm)
+
+plotMat <- gseaTab %>%
+
+    mutate(p.adj = -log10(p.adj), p.adj = ifelse(type == "Down", p.adj * -1, p.adj)) %>%
+    select(term_name, Treatment, p.adj) %>% unique() %>%
+    pivot_wider(names_from = "Treatment", values_from = "p.adj") %>%
+    column_to_rownames("term_name")
+
+plotMat[is.na(plotMat)] <- 0
+  
+geneOrder <- rownames(plotMat)[hclust(dist(plotMat), method = "ward.D2")$order]
+
+p <- gseaTab %>%
+  mutate(term_name = factor(term_name, levels = geneOrder), 
+         intersection_size = ifelse(intersection_size > 200, 200, intersection_size)) %>%
+  mutate(p.adj = -log10(p.adj), p.adj = ifelse(type == "Down", p.adj * -1, p.adj)) %>%
+  ggplot(aes(x = term_name, y = Treatment)) +
+  geom_point(aes(size = intersection_size, fill = p.adj), shape = 21) +
+  xlab("") + ylab("") + ggtitle("Top Enriched Gene Sets") +
+  lgd +
+  theme(axis.text = element_text(size = 10), 
+        axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 8.5), 
+        panel.background = element_rect(linewidth = 1, fill = "transparent")) +
+  scale_size_continuous(name = "Number of \nOverlapping Genes", 
+                        breaks = seq(0, max(gseaTab$intersection_size), by = 50), 
+                        limits = c(1, 200), range = c(0.5,7.5)) +
+  scale_fill_gradient2(low = "#1976D2", high = "#F44336", limits=c(-4, 4), oob=squish, 
+                       name = "-Log10(p.adj) \nwith Direction")
+  
+p
+
+ggsave(plot = p, filename = paste0(opt$plot, "top_genesets_dotplot.png"), 
+       height = 19.5, width = 50, units = "cm")
+
+```
+
+
+#### Output session info
+```{r pressure, echo=FALSE}
+sessionInfo()
+```

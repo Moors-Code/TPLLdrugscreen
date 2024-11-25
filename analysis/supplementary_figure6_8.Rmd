@@ -1,0 +1,1085 @@
+---
+title: "Supplemental Figure 6-8"
+author: "M. Pohly"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Load libraries
+```{r warning=FALSE, message=FALSE}
+library(readxl)
+library(tidyverse)
+library(jyluMisc)
+library(DrugScreenExplorer)
+library(ComplexHeatmap)
+library(circlize)
+library(gridExtra)
+library(parallel)
+library(edgeR)
+library(scran)
+library(scater)
+library(knitr)
+```
+
+## Define variables
+```{r}
+opt <- list()
+opt$drugscreen <- "data/submission/drugScreens_pseudo.RDS"
+opt$druganno <- "misc/drugList_suppl.xlsx"
+opt$western <- "data/western.csv"
+opt$scebulk <- "data/submission/RNA_complete.RDS"
+opt$plot <- "plots/SFig6_8/"
+
+## Set theme
+lgd <-  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5), 
+        text = element_text(size = 15),
+        panel.background = element_rect(fill = "transparent",colour = NA),
+        plot.background = element_rect(fill = "transparent",colour = NA), 
+        legend.background = element_rect(fill='transparent',colour = NA), 
+        strip.background = element_blank(), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+```
+
+## Load drug screen data and annotations
+```{r}
+## Load the drug screen data
+drugList <- readRDS(opt$drugscreen)
+drugAnno <- read_excel(opt$druganno) %>%
+  dplyr::select(-Supplier, -Screen) %>% unique()
+
+## Load the western data
+western <- read.csv(opt$western)
+
+## RNA-Seq data
+sce <- readRDS(opt$scebulk)
+sce
+
+colnames(sce) <- sce$uniqueBarcode
+## Define drug combinations
+drugComb <- c("Birinapant|Necrostatin-1 (25)", "Birinapant|QVD-Oph (25)", "Birinapant|Necrostatin-1 (25)|QVD-Oph (25)", 
+              "Birinapant|Necrostatin-1 (12.5)", "Birinapant|QVD-Oph (12.5)", "Birinapant|Necrostatin-1 (12.5)|QVD-Oph (12.5)",
+              "GDC-0152|Necrostatin-1 (25)", "GDC-0152|QVD-Oph (25)", "GDC-0152|Necrostatin-1 (25)|QVD-Oph (25)", "GDC-0152|Necrostatin-1 (12.5)", 
+              "GDC-0152|QVD-Oph (12.5)", "GDC-0152|Necrostatin-1 (12.5)|QVD-Oph (12.5)", "Birinapant|Ipatasertib (2)", 
+              "Birinapant|Ruxolitinib (2)", "Birinapant|Dacinostat (0.04)", "Birinapant|Venetoclax (0.04)",
+              "Birinapant|Bafilomycin_A1 (0.08)", "Birinapant|NSA (0.8)", "Birinapant|NSA (2)", 
+              "Birinapant|NSA (5)", "Birinapant|NSA (12.5)", "Birinapant|NSA (0.8)|QVD-Oph (25)", 
+              "Birinapant|NSA (2)|QVD-Oph (25)", "Birinapant|NSA (5)|QVD-Oph (25)", "Birinapant|NSA (12.5)|QVD-Oph (25)", 
+              "Birinapant + Ipatasertib 2µM", "Birinpant + Ruxolitinib 2µM", "Birinapant + Bafilomycin A1 0.08µM", 
+              "Birinapant + NSA 0.8µM",
+              "Birinapant + NSA 0.8µM + QVD-Oph 25µM", "Birinapant + NSA 2µM",  "Birinapant + NSA 5µM", 
+              "Birinapant + NSA 2µM + QVD-Oph 25µM", "Birinapant + NSA 5μM + QVD-Oph 25μM", 
+              "DMSO", "empty", "Necrostatin-1|QVD-Oph")
+
+
+```
+
+## SFig 6
+#### Compute correlation of IAP-inhibitor response and protein levels
+```{r warning=FALSE, message=FALSE, fig.height= 4, fig.width=15}
+
+## Define proteins of interest
+proteins <- colnames(western)[4:ncol(western)]
+
+western.long <- western %>% pivot_longer(cols = c(proteins),
+                         names_to = "protein", values_to = "expr") %>%
+  mutate(protein = str_replace(protein, pattern = "\\.", replacement = "-")) %>%
+  mutate(protein = ifelse(protein == "BCL-2", "Bcl-2", protein)) %>%
+  filter(!protein %in% c("MLKL", "MLKL_upperBand")) %>%
+  mutate(protein = ifelse(protein == "MLKL_lowerBand", "MLKL", protein),
+         protein = ifelse(protein == "Caspase8", "Caspase-8", protein))
+
+```
+
+#### Scatter plots correlation of IAP-inhibitor response and protein levels
+```{r warning=FALSE, message=FALSE, fig.height= 15, fig.width=20}
+t_lymphoma <- drugList[["ScreenE"]]
+
+## Convert proteins
+proteins <- colnames(western)[4:ncol(western)]
+
+western.long <- western %>% pivot_longer(cols = c(proteins),
+                         names_to = "protein", values_to = "expr") %>%
+  mutate(protein = str_replace(protein, pattern = "\\.", replacement = "-")) %>%
+  mutate(protein = ifelse(protein == "BCL-2", "Bcl-2", protein)) %>%
+  filter(!protein %in% c("MLKL", "MLKL_upperBand")) %>%
+  mutate(protein = ifelse(protein == "MLKL_lowerBand", "MLKL", protein),
+         protein = ifelse(protein == "Caspase8", "Caspase-8", protein))
+
+## Summarise the effect over concentrations
+screenDat <- t_lymphoma %>% filter(screen == "T_lymphoma") %>%
+  group_by(patientID, diagnosis, screen, name) %>%
+  mutate(viab.auc = mean(normVal.cor, na.rm = TRUE)) %>% ungroup()
+
+## Get viab.auc values for birinapant and gdc-0152
+drugRed <- screenDat %>% filter(diagnosis == "T-PLL", name %in% c("Birinapant", "GDC-0152")) %>%
+  select(patientID, diagnosis, name, viab.auc) %>% unique()
+
+#### Plot scatter plots for individual pairs
+drugPlot <- "Birinapant"
+proteinPlot <- c("RIPK3", "p53", "Bax", "Bcl-2", "cIAP-2", "cIAP-1", "Myc", "FLIPL")
+  
+pList <- lapply(proteinPlot, function(proteinPlot) {
+  p <- drugRed %>% left_join(western.long, by = c("patientID", "diagnosis")) %>%
+    filter(protein == proteinPlot, name == drugPlot) %>%
+    ggplot(aes(x = viab.auc, y = expr, fill = diagnosis)) +
+    ylab(paste0("Norm. ", proteinPlot, " Expression")) +
+    geom_smooth(method = "lm", colour = "black", fill = "lightgrey") +
+    geom_point(size = 4, shape = 21) + xlab(paste0("Avg. Viability ", drugPlot)) +
+    theme_classic() +
+    theme(text = element_text(size = 17.5), 
+          axis.text = element_text(size = 16),
+          legend.title = element_blank(),
+          axis.line = element_line(linewidth = 1),
+          legend.key = element_blank(),
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          panel.background = element_rect(fill = "transparent",colour = NA),
+          plot.background = element_rect(fill = "transparent",colour = NA),
+          legend.background = element_rect(fill='transparent')) +
+    scale_fill_manual(values = c("T-PLL" = "#64B5F6", "T-NHL" = "#A5D6A7"))
+})
+names(pList) <- proteinPlot
+grid.arrange(grobs = pList)
+
+lapply(proteinPlot, function(x) {
+  p <- pList[[x]]
+  ggsave(plot = p, filename = paste0(opt$plot, "corr_", drugPlot, "_", x, ".png"), 
+         height = 4.25, width = 5.5)
+})
+
+## Report estimates and adjusted p-values
+#corTab %>% filter(name == drugPlot, protein %in% proteinPlot)
+
+```
+
+#### Plot RNA data
+```{r fig.height= 7.5, fig.width= 6}
+t_lymphoma <- drugList[["ScreenE"]]
+
+## Summarise the effect over concentrations
+screenDat <- t_lymphoma %>% filter(screen == "T_lymphoma") %>%
+  group_by(patientID, diagnosis, screen, name) %>%
+  mutate(viab.auc = mean(normVal.cor, na.rm = TRUE)) %>% ungroup()
+
+## Select genes
+geneSub <- c("BCL2", "TP53", "MLKL", "CFLAR", "BIRC2", "BIRC3", "TRAF2", "FADD", "RIPK1",
+             "RIPK3", "BAX", "TNFRSF1A", "TNFRSF1B", "MYC",
+             "XIAP", "CASP8", "BBC3", "BCL2A1", "BCL2L1", "MCL1", "BIK", "BID", "BAD")
+colnames(sce) <- sce$uniqueBarcode
+
+keep <- filterByExpr(assays(sce)[["counts"]], group = sce$patientID)
+#keep <- which(rowData(sce)$Symbol == "ABCB1")
+keep <- rowData(sce) %>% data.frame() %>%
+  filter(Symbol %in% geneSub) %>% pull(ID)
+
+dmso.mat <- logcounts(sce[keep, sce$Treatment == "DMSO"])
+dmso.mat <- dmso.mat %>% data.frame() %>% rownames_to_column("gene")
+colnames(dmso.mat) <- str_replace(string = colnames(dmso.mat), pattern = "_DMSO", replacement = "")
+
+##
+plotMat <- dmso.mat %>%
+  left_join(select(data.frame(rowData(sce)), ID, Symbol), c("gene" = "ID")) %>%
+  select(-gene) %>%
+  column_to_rownames("Symbol")
+
+plotMat <- t(scale(t(plotMat)))
+
+## Make annotation
+biri.viab <- screenDat %>% 
+  filter(name == "Birinapant", patientID %in% colnames(plotMat)) %>%
+  select(patientID, name, viab.auc) %>%
+  unique() %>%
+  pivot_wider(names_from = "patientID", values_from = "viab.auc") %>%
+  column_to_rownames("name")
+
+colAnno <- as.data.frame(matrix(NA, nrow = 1, ncol = length(colnames(plotMat))))
+colnames(colAnno) <- colnames(plotMat)
+name.match <- match(colnames(colAnno), colnames(biri.viab))
+
+colAnno[, name.match[!is.na(name.match)]] <- biri.viab[, name.match[!is.na(name.match)]]
+
+colAnno <- colAnno %>% t() %>% data.frame()
+colnames(colAnno) <- "Avg.Viab."
+
+colfun <- colorRamp2(c(min(colAnno[, 1], na.rm = TRUE), max(colAnno[, 1], na.rm = TRUE)), c("white", "darkgreen"))
+
+pHeat <- Heatmap(plotMat, clustering_method_rows = "ward.D2", 
+        clustering_method_columns = "ward.D2",
+        col=colorRamp2(c(-2, 0, 2), colors = c("#1976D2", "white", "#F44336")), border = TRUE, 
+        name = "Scaled Expr.", #heatmap_legend_param = list(title_gp = gpar(fontsize = 11.5, fontface="bold")),
+        column_title = paste0("RNA Expression"), 
+        rect_gp = gpar(col = "black", lwd = 0.1),
+        column_title_gp = gpar(fontface = "plain", fontsize = 15),
+        bottom_annotation = HeatmapAnnotation(df = colAnno, na_col = "grey80", 
+                                           border = TRUE,
+                                           annotation_label = gt_render(""), # this way the label is set to zero
+                                           #gp = gpar(col = "black"), 
+                                           col = list(Avg.Viab. = colfun), 
+                                           which = "column")
+
+        #col=colorRamp2(c(0, max(western.long$expr)), colors = c("grey90", "#F44336"))
+        )
+
+pHeat
+png(file=paste0(opt$plot, "rna_heatmap.png"),
+    height = 15, width = 14, res = 600, units = "cm", bg = "transparent")
+draw(pHeat, background = "transparent")
+dev.off()
+
+```
+
+#### Correlation with RNA-Seq data
+```{r fig.height= 10, fig.width = 4}
+#### Define genes to subset
+geneSub <- c("BCL2", "TP53", "MLKL", "CFLAR", "BIRC2", "BIRC3", "TRAF2", "FADD", "RIPK1",
+                       "RIPK3", "BAX", "TNFRSF1A", "TNFRSF1B", "MYC",
+                       "XIAP", "CASP8", "BBC3", "BCL2A1", "BCL2L1", "MCL1", "BIK", "BID", "BAD")
+
+screenData <- drugList[["ScreenE"]]
+
+#keep <- filterByExpr(counts(sce), group = sce$patientID)
+#keep <- which(rowData(sce)$Symbol == "ABCB1")
+keep <- rowData(sce) %>% data.frame() %>%
+  filter(Symbol %in% geneSub) %>% pull(ID)
+
+dmso.mat <- logcounts(sce[keep, sce$Treatment == "DMSO"])
+dmso.mat <- dmso.mat %>% data.frame() %>% rownames_to_column("gene")
+colnames(dmso.mat) <- str_replace(string = colnames(dmso.mat), pattern = "_DMSO", replacement = "")
+
+## Calculate correlation between DMSO expression and drug response
+avg.df <- screenData %>% filter(!name %in% drugComb) %>%
+  filter(name %in% c("Birinapant", "GDC-0152")) %>%
+  group_by(patientID, name) %>%
+  summarise(viab.auc = mean(normVal.cor, na.rm = TRUE)) %>%
+  ungroup()
+
+corTab <- dmso.mat %>%
+    pivot_longer(cols = c(unique(sce$patientID)), 
+                 names_to = "patientID", values_to = "expr") %>%
+    left_join(avg.df, by = c("patientID" = "patientID")) %>%
+    group_by(gene, name) %>%
+    nest() %>%
+    mutate(m = map(data, ~cor.test(~viab.auc + expr, .))) %>%
+    mutate(res = map(m, broom::tidy)) %>%
+    unnest(res) %>% ungroup() %>%
+    select(name, gene, estimate, p.value) %>%
+    arrange(p.value) %>%
+    mutate(p.adj = p.adjust(p.value, method = "BH"))
+
+pTab <- corTab %>% left_join(select(data.frame(rowData(sce)), ID, Symbol), c("gene" = "ID")) %>%
+  filter(name == "Birinapant") %>%
+  filter(Symbol %in% c("BCL2", "TP53", "MLKL", "CFLAR", "BIRC2", "BIRC3", "TRAF2", "FADD", "RIPK1",
+                       "RIPK3", "BAX", "TNFRSF1A", "TNFRSF1B", "MYC",
+                       "XIAP", "CASP8", "BBC3", "BCL2A1", "BCL2L1", "MCL1", "BIK", "BID", "BAD", "ATM", "GAPDH")) %>%
+  mutate(p.adj = p.adjust(p.value, method = "BH"))
+
+kable(pTab)
+
+geneSub <- c("BCL2", "TP53", "MLKL", "CFLAR", "BIRC2", "BIRC3", "TRAF2", "FADD", "RIPK1",
+                       "RIPK3", "BAX", "TNFRSF1A", "TNFRSF1B", "MYC",
+                       "XIAP", "CASP8", "BBC3", "BCL2A1", "BCL2L1", "MCL1", "BIK", "BID", "BAD")
+
+## Get into matrix format for heatmap
+corMat <- corTab %>% left_join(select(data.frame(rowData(sce)), ID, Symbol), c("gene" = "ID")) %>% 
+  filter(name %in% c("Birinapant", "GDC-0152"), Symbol %in% geneSub) %>% 
+  mutate(p.value = -log10(p.value)) %>%
+  select(-p.adj, -p.value, -gene) %>% 
+  pivot_wider(names_from = "Symbol", values_from = "estimate") %>%
+  column_to_rownames("name")
+
+## Define colour scheme
+colorList <- c(colorRampPalette(c("lightseagreen", "white"))(20),
+               colorRampPalette(c("white"))(10),
+               colorRampPalette(c("white","deeppink"))(20))
+
+p4 <- pheatmap(t(corMat), color = colorList, 
+         breaks = seq(-1,1,length.out = 50), #main = "Correlation Gene Expression and Drug Response",
+                  column_title = "Corr. Gene Expression \n and Avg. Viab.",
+         column_title_gp = gpar(fontface = "plain", fontsize = 15),
+         border_color = "grey50",
+         clustering_method = "ward.D2", name = "R^2")
+p4
+
+png(file=paste0(opt$plot, "Corr_rna_drug.png"), 
+    height = 15, width = 7.5, res = 600, units = "cm", bg = "transparent")
+draw(p4, background = "transparent")
+dev.off()
+
+```
+
+#### Show scatter plots
+```{r fig.height= 10, fig.width=8.5, message=FALSE, warning=FALSE}
+## Show scatter plot
+pList <- lapply(c("Birinapant"), function(x) {
+  avg.df <- avg.df %>% filter(name == x) 
+  
+  pList <- lapply(c("BCL2", "BIRC2", "BIRC3", "CFLAR", "BAX", "MYC"), function(y) {
+    p <- dmso.mat %>% left_join(select(data.frame(rowData(sce)), ID, Symbol), c("gene" = "ID")) %>% 
+      filter(Symbol == y) %>%
+      pivot_longer(cols = c(unique(sce$patientID)), 
+                   names_to = "patientID", values_to = "expr") %>%
+      left_join(avg.df, by = c("patientID" = "patientID")) %>%
+      mutate(Diagnosis = ifelse(patientID == "H501", "T-LGL", "T-PLL")) %>%
+      ggplot(aes(x = viab.auc, y = expr)) +
+      geom_smooth(method = "lm", colour = "black", fill = "lightgrey") +
+      geom_point(size = 4, shape = 21, aes(fill = Diagnosis)) + xlab(paste0("Avg. Viability ", x)) +
+      ylab(paste0("Log Norm. Expr ", y)) +
+      theme_classic() +
+      theme(text = element_text(size = 17.5), 
+            axis.text = element_text(size = 16),
+            legend.title = element_blank(),
+            axis.line = element_line(linewidth = 1),
+            legend.key = element_blank(),
+            panel.grid.major = element_blank(), 
+            panel.grid.minor = element_blank(),
+            panel.background = element_rect(fill = "transparent",colour = NA),
+            plot.background = element_rect(fill = "transparent",colour = NA),
+            legend.background = element_rect(fill='transparent')) +
+      scale_fill_manual(values = c("T-PLL" = "#64B5F6", "T-LGL" = "#A5D6A7"))
+    
+    ggsave(plot = p, filename = paste0(opt$plot, "corr_rna_", x, "_", y, ".png"), 
+           height = 4.25, width = 5.5)
+    p
+  })
+  grid.arrange(grobs = pList)
+})
+
+```
+
+
+## SFig7
+#### Overlay expected and observed viability - per patient
+```{r fig.height= 20, fig.width=15, message=FALSE, warning=FALSE}
+drug.df <- drugList[["CombiTecan"]]
+
+drug.df <- drug.df %>% 
+  separate(name, into = c("drug1", "drug2", "drug3"), sep = "[|]", remove = FALSE) %>%
+  separate(drug2, into = c("drug2", "conc2"), sep = " ") %>%
+  separate(drug3, into = c("drug3", "conc3"), sep = " ") %>%
+  mutate(conc2 = str_replace(string = conc2, pattern = "uM", replacement = ""), 
+         conc2 = as.numeric(conc2))
+
+drug1Name <- c("Birinapant")
+drug2List <- drug.df %>% filter(!drug1 %in% c("DMSO", "PBS", "empty"), !is.na(drug2), is.na(drug3)) %>% pull(drug2) %>%
+  unique()
+
+## Calculate the combination index for every drug
+combiTab <- lapply(drug2List, function(x) {
+  lapply(unique(drug.df$patientID), function(y) {
+    drug.df <- drug.df %>% filter(patientID == y)
+    
+    message(x)
+    # dose-response of drug1 (single agent)
+    viabTab1 <- drug.df %>% filter(drug1 == drug1Name, is.na(drug2)) %>% dplyr::rename(viab1 = normVal)
+  
+    # dose-response of drug1 in combination with drug2
+    viabTab2 <-  drug.df %>% filter(drug1 == drug1Name, drug2 %in% x, is.na(drug3)) %>% dplyr::rename(viab2 = normVal) 
+  
+    # get the viability table of the drug with only 1 concentration (base drug)
+    viabSingle <- drug.df %>% filter(drug1 == x, concentration == unique(viabTab2$conc2), is.na(drug2)) %>%
+      distinct(patientID, normVal) %>% dplyr::rename(viab3 = normVal)
+
+    testTab <- viabTab2 %>%
+          left_join(select(viabTab1, patientID, viab1, concentration)) %>%
+          left_join(viabSingle) %>%
+          mutate(expViab = viab1*viab3) %>%
+          mutate(CI = viab2/expViab, meanViab2 = mean(viab2)) %>%
+          filter(!is.na(viab1), !is.na(viab2),!is.na(viab3)) %>%
+    dplyr::rename(obsViab = viab2)
+  }) %>% bind_rows()
+}) %>% bind_rows()
+
+lapply(c("Necrostatin-1", "NSA", "GSK-872", "QVD-Oph"), function(x) {
+  concInter <- drug.df %>% filter(name == "Birinapant") %>% pull(concentration) %>% unique()
+  
+  pList <- lapply(unique(combiTab$patientID), function(y) {
+    combiTab <- combiTab %>% filter(patientID == y) %>% 
+      filter(drug2 %in% x)
+    
+    if(x == "QVD-Oph")  {lim.plot <- 1.6} else {lim.plot <- 1.25} 
+  
+    p <- combiTab %>%
+      dplyr::rename(Expected = expViab, Observed = obsViab, Single = viab1) %>%
+      pivot_longer(cols = c(Expected, Observed, Single), names_to = "viab",
+                   values_to = "values") %>%
+      mutate(viab = factor(viab, levels = c("Observed", "Expected", "Single")),
+             drug2 = factor(drug2, levels = x), 
+             patientID = paste0(patientID, " (", diagnosis, ")")) %>%
+      arrange(desc(viab)) %>%
+      #filter(viab %in% c("Observed", "Expected")) %>%
+      ggplot(aes(x = concentration, y = values, group = viab)) +
+      geom_line(linewidth = 0.5, aes(colour = viab)) +
+      geom_point(size = 3.5, shape = 21, aes(fill = viab)) +
+      geom_hline(yintercept = 1, linetype = "dashed", colour = "black", linewidth = 0.75) +
+      geom_hline(yintercept = unique(combiTab$viab3), linetype = "dashed", colour = "darkorange", linewidth = 0.75) +
+      scale_x_log10(labels = concInter, breaks = concInter) +
+      scale_y_continuous(limits = c(0, lim.plot), breaks = c(0, 0.5, 1.0, 1.5)) +
+      xlab("Birinapant (µM)") + ylab("Viability") + #ggtitle(x) +
+      theme_classic() +
+      theme(text = element_text(size = 22.5),
+            plot.title = element_text(hjust = 0.5, size = 22.5),
+            panel.background = element_rect(fill = "transparent",colour = NA),
+            plot.background = element_rect(fill = "transparent",colour = NA),
+            legend.background = element_rect(fill='transparent'),
+            strip.background = element_blank(),
+            #strip.text.x = element_text(size = 12.5),
+            panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(),
+            legend.title = element_blank(),
+            axis.line = element_line(linewidth = 1),
+            #axis.text.y = element_text(size = 12.5),
+            #axis.text.x = element_text(angle = 45, hjust=1, vjust = 1),
+            legend.position = "none"
+      ) +
+      #scale_color_manual(values = c("Single" = "black", "Observed" = "#FFA000", "Expected" = "#4DB6AC"))
+      scale_color_manual(values = c("Observed" = "#F44336", "Expected" = "#1976D2", "Single" = "black")) +
+      scale_fill_manual(values = c("Observed" = "#F44336", "Expected" = "#1976D2", "Single" = "black")) +
+      facet_wrap(. ~ patientID)
+
+    # ggsave(plot = p, filename = paste0(opt$plot, x, "_combi_curve.png"),
+    #        height = 4, width = 4.75)
+
+    p
+  })
+  ggsave(plot = grid.arrange(grobs = pList, name = x), filename = paste0(opt$plot, x, "_combi_curve.png"),
+         height = 35, width = 30, units = "cm")
+})
+
+```
+
+
+#### Scatter plot birinapant + QVD-Oph vs birinapant + necrostatin-1
+```{r, message=FALSE, warning=FALSE}
+screenData <- drugList[["ScreenE"]]
+
+screenData <- screenData %>% select(screen, wellID, value, patientID, sampleID, diagnosis, name,
+                                    concentration, wellType, normVal, normVal.cor, concIndex) %>%
+  mutate(name = str_replace(name, "Bafilomycin A1", "Bafilomycin_A1")) %>%
+  filter(screen == "T_lymphoma") %>%
+  separate(name, into = c("drug1","drugB","drugC"), sep = "[|]", remove = FALSE) %>%
+  separate(drugB, into=c("drug2", "conc2"), sep = " ") %>%
+  separate(drugC , into = c("drug3", "conc3"), sep = " ") %>%
+  mutate(conc2 = as.numeric(str_remove_all(conc2,"[() ]")),
+         conc3 = as.numeric(str_remove_all(conc3, "[() ]"))) %>%
+  mutate(conc2 = ifelse(drug2 == "QVD-Oph" & is.na(conc2), concentration, conc2))
+
+comObs <- screenData %>% filter(drug1 %in% c("Birinapant", "GDC-0152"), !is.na(drug2), is.na(drug3)) %>% #only 2 drug combinations
+  select(patientID, sampleID, diagnosis, name, drug1, drug2, concentration, conc2, normVal.cor) %>%
+  dplyr::rename(comViab = normVal.cor)
+
+drugObs <- screenData %>% filter(drug1 %in% c("Birinapant", "GDC-0152"), is.na(drug2)) %>%
+  select(sampleID, drug1, concentration, normVal.cor) %>% 
+  dplyr::rename(drugViab = normVal.cor)
+
+baseObs <- screenData %>% filter(drug1 %in% c("Ipatasertib", "NSA", 
+                                              "Bafilomycin_A1", "Ruxolitinib", 
+                                              "Venetoclax", "Dacinostat", "Necrostatin-1", "QVD-Oph"), is.na(drug2)) %>%
+  select(sampleID, drug1, concentration, normVal.cor) %>%
+  dplyr::rename(drug2 = drug1, conc2 = concentration, baseViab = normVal.cor)
+
+dmsoObs <- screenData %>% filter(drug1 == "DMSO") %>%
+  group_by(sampleID) %>% summarise(dmsoViab = mean(normVal.cor))
+
+## CombiConc
+combiConc <- 12.5
+
+combiTab <- left_join(comObs, drugObs, by = c("sampleID", "drug1", "concentration")) %>%
+  left_join(baseObs, by = c("sampleID","drug2", "conc2")) %>%
+  left_join(dmsoObs, by = "sampleID") %>%
+#  mutate(expViab = drugViab*baseViab/dmsoViab) %>%
+  mutate(expViab = drugViab*baseViab) %>%
+  mutate(CI =  comViab/expViab) %>%
+  arrange(name) %>%
+  filter(conc2 %in% combiConc)
+
+## Drug combinations necrostatin-1 and QVD-Oph
+sumCombiTab <- combiTab %>% 
+  filter(drug2 %in% c("Necrostatin-1", "QVD-Oph")) %>%
+  mutate(diagnosis = ifelse(diagnosis %in% c("PTCL", "T-LGL", "Sezary", "AITL"), "T-NHL", diagnosis)) %>%
+  mutate(diagnosis = ifelse(diagnosis %in% c("CLL", "MCL", "MZL", "DLBCL", "HCL"), "B-cell", diagnosis)) %>%
+  group_by(patientID, diagnosis, drug1, drug2) %>%
+  summarise(meanCI = log(mean(CI))) %>% ungroup()
+                       
+plotTab <- sumCombiTab %>% 
+  pivot_wider(names_from = drug2, values_from = meanCI)
+                       
+p5 <- plotTab %>%
+  filter(drug1 == "Birinapant") %>%
+  dplyr::rename(Diagnosis = diagnosis) %>%
+  ggplot(aes(x=`Necrostatin-1`, y=`QVD-Oph`, fill = Diagnosis, label = patientID)) +
+    geom_point(size = 4, shape = 21, stroke = 0.2) +
+    geom_hline(yintercept = 0) + geom_vline(xintercept = 0) +
+  xlab("Log2(Avg. CI) - Necrostatin-1") +
+  ylab("Log2(Avg. CI) - Q-VD-Oph") +
+    ggtitle("Birinapant") +
+    theme_classic() +
+    theme(text = element_text(size = 17.5),
+          plot.title = element_text(hjust = 0.5),
+     # axis.text=element_text(size=12),
+      #axis.title=element_text(size=14),
+      #legend.position = "none", 
+      strip.background = element_blank(),
+      #strip.text = element_text(size = 12), 
+      panel.grid.major = element_blank(), 
+      panel.grid.minor = element_blank(),
+      axis.line = element_line(linewidth = 1),
+      panel.background = element_rect(fill = "transparent",colour = NA),
+      plot.background = element_rect(fill = "transparent",colour = NA), 
+      legend.background = element_rect(fill='transparent')) +
+    scale_fill_manual(values = c("B-cell" = "#F44336", "T-PLL" = "#64B5F6", "T-NHL" = "#A5D6A7")) +
+    #scale_fill_manual(values = c("B-cell" = "#F44336", "T-PLL" = "#CE93D8", "Other T-cell" = "#FDD835")) +
+  guides(fill = guide_legend(override.aes = list(size=3.5)))
+p5
+
+ggsave(plot = p5, filename = paste0(opt$plot, "QVD_vs_Necro_biri.png"), 
+       height = 5, width = 6.5)
+
+
+```
+
+#### Scatter plot birinapant + QVD-Oph vs birinapant + NSA
+```{r}
+screenData <- drugList[["ScreenE"]]
+
+screenData <- screenData %>% select(screen, wellID, value, patientID, sampleID, diagnosis, name,
+                                    concentration, wellType, normVal, concIndex) %>%
+  unique() %>%
+  mutate(diagnosis = ifelse(diagnosis %in% c("Sezary", "T-LGL", "AITL", "PTCL"), "T-NHL", diagnosis)) %>%
+  mutate(name = str_replace(name, "Bafilomycin A1", "Bafilomycin_A1")) %>%
+  filter(screen == "T_lymphoma_combi") %>%
+  separate(name, into = c("drug1","drugB","drugC"), sep = "[|]", remove = FALSE) %>%
+  separate(drugB, into=c("drug2", "conc2"), sep = " ") %>%
+  separate(drugC , into = c("drug3", "conc3"), sep = " ") %>%
+  mutate(conc2 = as.numeric(str_remove_all(conc2,"[() ]")),
+         conc3 = as.numeric(str_remove_all(conc3, "[() ]"))) %>%
+  mutate(conc2 = ifelse(drug2 == "QVD-Oph" & is.na(conc2), concentration, conc2))
+
+comObs <- screenData %>% filter(drug1 %in% c("Birinapant", "GDC-0152"), !is.na(drug2), is.na(drug3)) %>% #only 2 drug combinations
+  select(patientID, sampleID, diagnosis, name, drug1, drug2, concentration, conc2, normVal) %>%
+  dplyr::rename(comViab = normVal) %>% unique()
+
+drugObs <- screenData %>% filter(drug1 %in% c("Birinapant", "GDC-0152"), is.na(drug2)) %>%
+  select(sampleID, drug1, concentration, normVal) %>% 
+  dplyr::rename(drugViab = normVal) %>% unique()
+
+baseObs <- screenData %>% filter(drug1 %in% c("NSA", "Necrostatin-1", "QVD-Oph"), is.na(drug2)) %>%
+  select(sampleID, drug1, concentration, normVal) %>%
+  dplyr::rename(drug2 = drug1, conc2 = concentration, baseViab = normVal) %>% unique()
+
+dmsoObs <- screenData %>% filter(drug1 == "DMSO") %>%
+  group_by(sampleID) %>% summarise(dmsoViab = mean(normVal))
+
+combiTabNSA <- left_join(comObs, drugObs, by = c("sampleID", "drug1", "concentration")) %>%
+  left_join(baseObs, by = c("sampleID","drug2", "conc2")) %>%
+  left_join(dmsoObs, by = "sampleID") %>%
+#  mutate(expViab = drugViab*baseViab/dmsoViab) %>%
+  mutate(expViab = drugViab*baseViab) %>%
+  mutate(CI =  comViab/expViab) %>%
+  arrange(name)
+
+combiTabNSA
+
+drug1Name <- c("Birinapant")
+drug2List <- c("NSA")
+#diagList <- c("T-PLL", "CLL", "MCL", "Sezary", "T-LGL", "PTCL")
+diagList <- c("CLL", "MCL", "T-PLL", "T-NHL")
+combiConc <- c(2)
+
+combiTestResNSA <- lapply(drug1Name, function(y) {
+  lapply(drug2List, function(x) {
+    res <- lapply(diagList, function(diag) {
+      message(diag)
+      screenSub <- filter(screenData, diagnosis == diag, is.na(drug3))
+      testTab <- lapply(combiConc, function(conc){
+        viabTab1 <- filter(screenSub, drug1 == y, is.na(drug2)) %>%
+          dplyr::rename(viabBackbone = normVal) # get viability of backbone drug
+        viabTab2 <- filter(screenSub, drug1 == y, drug2 %in% x, conc2 == conc) %>%
+          dplyr::rename(viabCombi = normVal) # get viability of combination (at different concentrations)
+        viabTab3 <- filter(screenSub, drug1 == x, concentration == conc, is.na(drug2)) %>%
+          dplyr::rename(viabSingle = normVal) # get viability of comb, drug as single compound.
+        mergeTab <- viabTab2 %>%
+          left_join(select(viabTab1, sampleID, viabBackbone, concentration)) %>%
+          left_join(select(viabTab3, sampleID, viabSingle))  %>%
+          mutate(expViab = viabBackbone*viabSingle) %>%
+          mutate(CI = viabCombi/expViab) %>%
+          filter(!is.na(viabBackbone), !is.na(viabCombi),!is.na(viabSingle))
+      }) %>% bind_rows()
+      lapply(unique(testTab$concentration), function(concBackbone) {
+        eachConcTab <- filter(testTab, concentration == concBackbone)
+        sumTab <- eachConcTab %>%
+          group_by(patientID, concentration) %>%
+          mutate(meanExpViab = mean(expViab), meanViabCombi = mean(viabCombi)) %>% # Summarise over combi concentrations
+          ungroup() %>% select(patientID, diagnosis, drug1, drug2, concentration, meanExpViab, meanViabCombi) %>%
+          unique()
+        prepTab <- sumTab %>%
+          pivot_longer(cols = c("meanExpViab", "meanViabCombi"), values_to = "response", names_to = "type")
+        p.val <- t.test(response ~ type, data = prepTab, equal.var = TRUE, paired = TRUE)$p.value
+        meanTab <- eachConcTab %>%
+          group_by(concentration) %>%
+          mutate(meanCI = mean(CI)) %>% select(meanCI, concentration) %>% unique()
+        tibble(drug1 = y, drug2 = x, diagnosis = diag, concentration = concBackbone, p.value = p.val,
+               meanCI = meanTab$meanCI)
+      }) %>% bind_rows()
+    }) %>% bind_rows()
+  }) %>% bind_rows()
+}) %>% bind_rows() %>% mutate(p.adj = p.adjust(p.value, method = "BH"))
+
+sumCombiTab <- rbind(combiTab, combiTabNSA) %>% filter(drug2 %in% c("NSA", "QVD-Oph")) %>%
+  mutate(diagnosis = ifelse(diagnosis %in% c("PTCL", "T-LGL", "Sezary", "AITL"), "T-NHL", diagnosis)) %>%
+  mutate(diagnosis = ifelse(diagnosis %in% c("CLL", "MCL", "MZL", "DLBCL"), "B-cell", diagnosis)) %>%
+  group_by(patientID, diagnosis, drug1, drug2) %>%
+  summarise(meanCI = log(mean(CI))) %>% ungroup()
+
+plotTab <- sumCombiTab %>%
+  pivot_wider(names_from = drug2, values_from = meanCI)
+
+p4 <- plotTab %>%
+  filter(drug1 == "Birinapant") %>%
+  dplyr::rename(Diagnosis = diagnosis) %>%
+  ggplot(aes(x=`NSA`, y=`QVD-Oph`, fill = Diagnosis, label = patientID)) +
+  geom_point(size = 4, shape = 21, stroke = 0.2) +
+  geom_hline(yintercept = 0) + geom_vline(xintercept = 0) +
+  xlab("Log2(Avg. CI) - NSA") +
+  ylab("Log2(Avg. CI) - Q-VD-Oph") +
+  ggtitle("Birinapant") +
+  theme_classic() +
+  theme(text = element_text(size = 17.5),
+        plot.title = element_text(hjust = 0.5),
+        # axis.text=element_text(size=12),
+        #axis.title=element_text(size=14),
+        #legend.position = "none",
+        strip.background = element_blank(),
+        #strip.text = element_text(size = 12),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.line = element_line(linewidth = 1),
+        panel.background = element_rect(fill = "transparent",colour = NA),
+        plot.background = element_rect(fill = "transparent",colour = NA),
+        legend.background = element_rect(fill='transparent')) +
+  scale_fill_manual(values = c("B-cell" = "#F44336", "T-PLL" = "#64B5F6", "T-NHL" = "#A5D6A7"))
+p4
+
+ggsave(plot = p4, filename = paste0(opt$plot, "QVD_vs_NSA.png"),
+       height = 5, width = 6.5)
+
+```
+
+
+## SFig8
+#### Heatmap GDC-0152 + QVD-Oph/necrostatin-1
+```{r fig.height= 4, fig.width=8.5, warning=FALSE, message=FALSE}
+
+t_lymphoma <- drugList[["ScreenE"]]
+
+## Drug combinations (with normVal.cor)
+screenData <- t_lymphoma %>%
+  mutate(diagnosis = ifelse(diagnosis %in% c("Sezary", "T-LGL", "AITL", "PTCL"), "T-NHL", diagnosis))
+
+screenData <- screenData %>% select(screen, wellID, value, patientID, sampleID, diagnosis, name,
+                                    concentration, wellType, normVal, normVal.cor, concIndex) %>%
+  mutate(name = str_replace(name, "Bafilomycin A1", "Bafilomycin_A1")) %>%
+  filter(screen == "T_lymphoma") %>%
+  separate(name, into = c("drug1","drugB","drugC"), sep = "[|]", remove = FALSE) %>%
+  separate(drugB, into=c("drug2", "conc2"), sep = " ") %>%
+  separate(drugC , into = c("drug3", "conc3"), sep = " ") %>%
+  mutate(conc2 = as.numeric(str_remove_all(conc2,"[() ]")),
+         conc3 = as.numeric(str_remove_all(conc3, "[() ]"))) %>%
+  mutate(conc2 = ifelse(drug2 == "QVD-Oph" & is.na(conc2), concentration, conc2))
+
+
+drug1Name <- c("GDC-0152")
+drug2List <- c("Necrostatin-1", "QVD-Oph")
+#diagList <- c("T-PLL", "MCL", "CLL", "T-LGL", "Sezary", "PTCL") 
+diagList <- c("CLL", "MCL", "T-PLL", "T-NHL") 
+combiConc <- c(12.5#, 25
+               )
+
+## paired t-test (mean of drug 2 conc)
+combiTestRes <- lapply(drug1Name, function(y) {  
+  lapply(drug2List, function(x) {
+    res <- lapply(diagList, function(diag) {
+      screenSub <- filter(screenData, diagnosis == diag, is.na(drug3))
+      testTab <- lapply(combiConc, function(conc){
+        viabTab1 <- filter(screenSub, drug1 == y, is.na(drug2)) %>%
+          dplyr::rename(viabBackbone = normVal.cor) # get viability of backbone drug
+        viabTab2 <- filter(screenSub, drug1 == y, drug2 %in% x, conc2 == conc) %>%
+          dplyr::rename(viabCombi = normVal.cor) # get viability of combination (at different concentrations)
+        viabTab3 <- filter(screenSub, drug1 == x, concentration == conc, is.na(drug2)) %>%
+          dplyr::rename(viabSingle = normVal.cor) # get viability of comb, drug as single compound.
+        mergeTab <- viabTab2 %>%
+          left_join(select(viabTab1, sampleID, viabBackbone, concentration)) %>%
+          left_join(select(viabTab3, sampleID, viabSingle))  %>%
+          mutate(expViab = viabBackbone*viabSingle) %>%
+          mutate(CI = viabCombi/expViab) %>%
+          filter(!is.na(viabBackbone), !is.na(viabCombi),!is.na(viabSingle))
+      }) %>% bind_rows()
+      lapply(unique(testTab$concentration), function(concBackbone) {
+        eachConcTab <- filter(testTab, concentration == concBackbone)
+        sumTab <- eachConcTab %>%
+          group_by(patientID, concentration) %>%
+          mutate(meanExpViab = mean(expViab), meanViabCombi = mean(viabCombi)) %>% # Summarise over combi concentrations
+          ungroup() %>% select(patientID, diagnosis, drug1, drug2, concentration, meanExpViab, meanViabCombi) %>% 
+          unique()
+        prepTab <- sumTab %>% 
+          pivot_longer(cols = c("meanExpViab", "meanViabCombi"), values_to = "response", names_to = "type")
+        p.val <- t.test(response ~ type, data = prepTab, equal.var = TRUE, paired = TRUE)$p.value
+        meanTab <- eachConcTab %>%
+          group_by(concentration) %>%
+          mutate(meanCI = mean(CI)) %>% select(meanCI, concentration) %>% unique()
+        tibble(drug1 = y, drug2 = x, diagnosis = diag, concentration = concBackbone, p.value = p.val, 
+               meanCI = meanTab$meanCI)
+      }) %>% bind_rows()
+    }) %>% bind_rows()
+  }) %>% bind_rows()
+}) %>% bind_rows() %>% mutate(p.adj = p.adjust(p.value, method = "BH"))
+
+plotTab <- combiTestRes %>%
+  mutate(pSign = -log10(p.adj)*sign(log(meanCI)), 
+         sigSign = ifelse(p.adj < 0.05, "*","")) 
+
+p4 <- plotTab %>%
+  mutate(concentration = round(concentration, 5), 
+         drug2 = ifelse(drug2 == "QVD-Oph", "Q-VD-Oph", drug2),
+         #drug2 = factor(drug2, levels = c("Q-VD-Oph", "Necrostatin-1")), 
+         diagnosis = factor(diagnosis, levels = diagList),
+         drug2 = paste0(drug1, " + ", drug2)) %>%
+  ggplot(aes(x = diagnosis, y = factor(concentration), fill = pSign)) +
+  geom_tile(colour = "black", size = 0.05) +
+  xlab("") +
+  ylab("Concentration (µM)") +
+  facet_wrap(. ~ drug2, scale = "free") +
+  scale_fill_gradient2(high = "#F44336", mid = "white", low = "#1976D2", midpoint = 0,
+                       name = "-Log10(p.adj) \n with Direction") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, hjust=1, vjust = 0.5, size = 11.5),
+        axis.text.y = element_text(size = 11.5), 
+        axis.title = element_text(size=13.5),
+        strip.background = element_blank(), 
+        strip.text.x = element_text(size = 11.5), 
+        line = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "transparent",colour = NA),
+        plot.background = element_rect(fill = "transparent",colour = NA),
+        legend.title = element_text(size = 12.5),
+        legend.text = element_text(size = 11.5),
+        legend.background = element_rect(fill='transparent'), 
+        #panel.border = element_rect(colour = "black", fill=NA, size=1)
+        panel.border = element_rect(colour = "black", fill=NA, size=1))
+p4
+
+ggsave(plot = p4, paste0(opt$plot, "CI_", drug1Name, "_heatmap.png"), height = 4, width = 8.25)
+
+```
+
+
+#### Calculating the combination effect
+```{r, message=FALSE, warning=FALSE, warning=FALSE, message=FALSE}
+t_lymphoma <- drugList[["ScreenE"]]
+
+## Drug combinations (with normVal.cor)
+screenData <- t_lymphoma %>%
+  mutate(diagnosis = ifelse(diagnosis %in% c("Sezary", "T-LGL", "AITL", "PTCL"), "T-NHL", diagnosis))
+screenData <- screenData %>% select(screen, wellID, value, patientID, sampleID, diagnosis, name,
+                                    concentration, wellType, normVal, normVal.cor, concIndex) %>%
+  mutate(name = str_replace(name, "Bafilomycin A1", "Bafilomycin_A1")) %>%
+  filter(screen == "T_lymphoma") %>%
+  separate(name, into = c("drug1","drugB","drugC"), sep = "[|]", remove = FALSE) %>%
+  separate(drugB, into=c("drug2", "conc2"), sep = " ") %>%
+  separate(drugC , into = c("drug3", "conc3"), sep = " ") %>%
+  mutate(conc2 = as.numeric(str_remove_all(conc2,"[() ]")),
+         conc3 = as.numeric(str_remove_all(conc3, "[() ]"))) %>%
+  mutate(conc2 = ifelse(drug2 == "QVD-Oph" & is.na(conc2), concentration, conc2))
+
+comObs <- screenData %>% filter(drug1 %in% c("Birinapant", "GDC-0152"), !is.na(drug2), is.na(drug3)) %>% #only 2 drug combinations
+  select(patientID, sampleID, diagnosis, name, drug1, drug2, concentration, conc2, normVal.cor) %>%
+  dplyr::rename(comViab = normVal.cor)
+
+drugObs <- screenData %>% filter(drug1 %in% c("Birinapant", "GDC-0152"), is.na(drug2)) %>%
+  select(sampleID, drug1, concentration, normVal.cor) %>% 
+  dplyr::rename(drugViab = normVal.cor)
+
+baseObs <- screenData %>% filter(drug1 %in% c("Ipatasertib", "NSA", 
+                                              "Bafilomycin_A1", "Ruxolitinib", 
+                                              "Venetoclax", "Dacinostat", "Necrostatin-1", "QVD-Oph"), is.na(drug2)) %>%
+  select(sampleID, drug1, concentration, normVal.cor) %>%
+  dplyr::rename(drug2 = drug1, conc2 = concentration, baseViab = normVal.cor)
+
+dmsoObs <- screenData %>% filter(drug1 == "DMSO") %>%
+  group_by(sampleID) %>% summarise(dmsoViab = mean(normVal.cor))
+
+combiConc <- 12.5
+
+combiTab <- left_join(comObs, drugObs, by = c("sampleID", "drug1", "concentration")) %>%
+  left_join(baseObs, by = c("sampleID","drug2", "conc2")) %>%
+  left_join(dmsoObs, by = "sampleID") %>%
+#  mutate(expViab = drugViab*baseViab/dmsoViab) %>%
+  mutate(expViab = drugViab*baseViab) %>%
+  mutate(CI =  comViab/expViab) %>%
+  arrange(name) %>%
+  filter(conc2 %in% combiConc)
+```
+
+#### Scatter plot GDC-0152 + QVD-Oph vs birinapant + necrostatin-1
+```{r fig.height= 5, fig.width=6.5, message=FALSE, warning=FALSE}
+## Drug combinations necrostatin-1 and QVD-Oph
+sumCombiTab <- combiTab %>% filter(conc2 == combiConc) %>%
+  filter(drug2 %in% c("Necrostatin-1", "QVD-Oph")) %>%
+  mutate(diagnosis = ifelse(diagnosis %in% c("PTCL", "T-LGL", "Sezary", "AITL"), "T-NHL", diagnosis)) %>%
+  mutate(diagnosis = ifelse(diagnosis %in% c("CLL", "MCL", "MZL", "DLBCL"), "B-cell", diagnosis)) %>%
+  group_by(patientID, diagnosis, drug1, drug2) %>%
+  summarise(meanCI = log(mean(CI))) %>% ungroup()
+                       
+plotTab <- sumCombiTab %>% 
+  pivot_wider(names_from = drug2, values_from = meanCI)
+
+p4 <- plotTab %>%
+  filter(drug1 == "GDC-0152") %>%
+  dplyr::rename(Diagnosis = diagnosis) %>%
+  ggplot(aes(x=`Necrostatin-1`, y=`QVD-Oph`, fill = Diagnosis, label = patientID)) +
+  geom_point(size = 4, shape = 21, stroke = 0.2) +
+  geom_hline(yintercept = 0) + geom_vline(xintercept = 0) +
+  ggtitle("GDC-0152") +
+  xlab("Log2(Avg. CI) - Necrostatin-1") +
+  ylab("Log2(Avg. CI) - Q-VD-Oph") +
+  theme_classic() +
+  theme(text = element_text(size = 17.5),
+        plot.title = element_text(hjust = 0.5),
+        # axis.text=element_text(size=12),
+        #axis.title=element_text(size=14),
+        #legend.position = "none", 
+        strip.background = element_blank(),
+        #strip.text = element_text(size = 12), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.line = element_line(linewidth = 0.75),
+        panel.background = element_rect(fill = "transparent",colour = NA),
+        plot.background = element_rect(fill = "transparent",colour = NA), 
+        legend.background = element_rect(fill='transparent')) +
+  scale_fill_manual(values = c("B-cell" = "#F44336", "T-PLL" = "#64B5F6", "T-NHL" = "#A5D6A7")) +
+  #scale_fill_manual(values = c("B-cell" = "#F44336", "T-PLL" = "#CE93D8", "Other T-cell" = "#FDD835")) +
+  guides(fill = guide_legend(override.aes = list(size=3.5)))
+
+p4
+
+ggsave(plot = p4, paste0(opt$plot, "QVD_vs_Necro_gdc.png"), height = 5, width = 6.5)
+```
+
+#### Output per patient dose response curves - T-PLL
+```{r fig.height= 25, fig.width=15, message=FALSE, warning=FALSE}
+drug.df <- drugList[["CombiTecan"]]
+
+drug.df <- drug.df %>% 
+  separate(name, into = c("drug1", "drug2", "drug3"), sep = "[|]", remove = FALSE) %>%
+  separate(drug2, into = c("drug2", "conc2"), sep = " ") %>%
+  separate(drug3, into = c("drug3", "conc3"), sep = " ") %>%
+  mutate(conc2 = str_replace(string = conc2, pattern = "uM", replacement = ""), 
+         conc2 = as.numeric(conc2))
+
+drug1Name <- c("Birinapant")
+drug2List <- drug.df %>% filter(!drug1 %in% c("DMSO", "PBS", "empty"), !is.na(drug2), is.na(drug3)) %>% pull(drug2) %>%
+  unique()
+
+## Calculate the combination index for every drug
+combiTab <- lapply(drug2List, function(x) {
+  lapply(unique(drug.df$patientID), function(y) {
+    drug.df <- drug.df %>% filter(patientID == y)
+    
+    message(x)
+    # dose-response of drug1 (single agent)
+    viabTab1 <- drug.df %>% filter(drug1 == drug1Name, is.na(drug2)) %>% dplyr::rename(viab1 = normVal)
+  
+    # dose-response of drug1 in combination with drug2
+    viabTab2 <-  drug.df %>% filter(drug1 == drug1Name, drug2 %in% x, is.na(drug3)) %>% dplyr::rename(viab2 = normVal) 
+  
+    # get the viability table of the drug with only 1 concentration (base drug)
+    viabSingle <- drug.df %>% filter(drug1 == x, concentration == unique(viabTab2$conc2), is.na(drug2)) %>%
+      distinct(patientID, normVal) %>% dplyr::rename(viab3 = normVal)
+
+    testTab <- viabTab2 %>%
+          left_join(select(viabTab1, patientID, viab1, concentration)) %>%
+          left_join(viabSingle) %>%
+          mutate(expViab = viab1*viab3) %>%
+          mutate(CI = viab2/expViab, meanViab2 = mean(viab2)) %>%
+          filter(!is.na(viab1), !is.na(viab2),!is.na(viab3)) %>%
+    dplyr::rename(obsViab = viab2)
+  }) %>% bind_rows()
+}) %>% bind_rows()
+
+lapply(c("Ibrutinib", "Motolimod"), function(x) {
+  concInter <- drug.df %>% filter(name == "Birinapant") %>% pull(concentration) %>% unique()
+  
+  pList <- lapply(unique(combiTab$patientID), function(y) {
+    combiTab <- combiTab %>% filter(patientID == y) %>% 
+      filter(drug2 %in% x)
+    
+    if(x == "Motolimod")  {
+      lim.plot <- 1.5
+    } else if(x == "QVD-Oph") {
+      lim.plot <- 1.5
+      } else {lim.plot <- 1.25}
+
+    p <- combiTab %>%
+      dplyr::rename(Expected = expViab, Observed = obsViab, Single = viab1) %>%
+      pivot_longer(cols = c(Expected, Observed, Single), names_to = "viab",
+                   values_to = "values") %>%
+      mutate(viab = factor(viab, levels = c("Observed", "Expected", "Single")),
+             drug2 = factor(drug2, levels = x), 
+             patientID = paste0(patientID, " (", diagnosis, ")")) %>%
+      arrange(desc(viab)) %>%
+      #filter(viab %in% c("Observed", "Expected")) %>%
+      ggplot(aes(x = concentration, y = values, group = viab)) +
+      geom_line(linewidth = 0.5, aes(colour = viab)) +
+      geom_point(size = 3.5, shape = 21, aes(fill = viab)) +
+      geom_hline(yintercept = 1, linetype = "dashed", colour = "black", linewidth = 0.75) +
+      geom_hline(yintercept = unique(combiTab$viab3), linetype = "dashed", colour = "darkorange", linewidth = 0.75) +
+      scale_x_log10(labels = concInter, breaks = concInter) +
+      scale_y_continuous(limits = c(0, lim.plot), breaks = c(0, 0.5, 1.0, 1.5)) +
+      xlab("Birinapant (µM)") + ylab("Viability") + #ggtitle(x) +
+      facet_wrap(. ~ patientID) +
+      theme_classic() +
+      theme(text = element_text(size = 22.5),
+            plot.title = element_text(hjust = 0.5, size = 22.5),
+            panel.background = element_rect(fill = "transparent",colour = NA),
+            plot.background = element_rect(fill = "transparent",colour = NA),
+            legend.background = element_rect(fill='transparent'),
+            strip.background = element_blank(),
+            #strip.text.x = element_text(size = 12.5),
+            panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(),
+            legend.title = element_blank(),
+            axis.line = element_line(linewidth = 1),
+            #axis.text.y = element_text(size = 12.5),
+            #axis.text.x = element_text(angle = 45, hjust=1, vjust = 1),
+            #legend.position = c(0.25, 0.25
+            legend.position = "none"
+      ) +
+      #scale_color_manual(values = c("Single" = "black", "Observed" = "#FFA000", "Expected" = "#4DB6AC"))
+      scale_color_manual(values = c("Observed" = "#F44336", "Expected" = "#1976D2", "Single" = "black")) +
+      scale_fill_manual(values = c("Observed" = "#F44336", "Expected" = "#1976D2", "Single" = "black"))
+      #p
+
+    #p
+  })
+  ggsave(plot = grid.arrange(grobs = pList, name = x), filename = paste0(opt$plot, x, "_combi_curve.png"),
+         height = 35, width = 30, units = "cm")
+  
+  grid.arrange(grobs = pList, name = x)
+})
+combiTab %>% filter(patientID == "P0033", drug2 == "QVD-Oph")
+
+
+```
+
+#### Output per patient dose response curves - T-PLL (ibrutinib, motolimod)
+```{r fig.height= 25, fig.width=15, message=FALSE, warning=FALSE}
+drug.dfman <- drugList[["CombiManual"]]
+
+drug.dfman <- drug.dfman %>% 
+  separate(name, into = c("drug1", "drug2", "drug3"), sep = "[|]", remove = FALSE) %>%
+  separate(drug2, into = c("drug2", "conc2"), sep = " ") %>%
+  separate(drug3, into = c("drug3", "conc3"), sep = " ") %>%
+  mutate(conc2 = str_replace(string = conc2, pattern = "ug/ml", replacement = ""), 
+         conc2 = as.numeric(conc2))
+
+drug.dfman$drug2 %>% unique()
+
+drug1Name <- c("Birinapant")
+drug2List <- drug.df %>% filter(!drug1 %in% c("DMSO", "PBS", "empty"), !is.na(drug2), is.na(drug3)) %>% pull(drug2) %>%
+  unique()
+
+drug2List <- c("Adalimumab", "CD95L")
+
+## Calculate the combination index for every drug
+combiTab <- lapply(drug2List, function(x) {
+  lapply(unique(drug.dfman$patientID), function(y) {
+    drug.df <- drug.dfman %>% filter(patientID == y)
+    
+    message(x)
+    # dose-response of drug1 (single agent)
+    viabTab1 <- drug.df %>% filter(drug1 == drug1Name, is.na(drug2)) %>% dplyr::rename(viab1 = normVal)
+
+    # dose-response of drug1 in combination with drug2
+    viabTab2 <-  drug.df %>% filter(drug1 == drug1Name, drug2 %in% x, is.na(drug3)) %>% dplyr::rename(viab2 = normVal)
+
+    # get the viability table of the drug with only 1 concentration (base drug)
+    viabSingle <- drug.df %>% filter(drug1 == x, concentration == unique(viabTab2$conc2), is.na(drug2)) %>%
+      distinct(patientID, normVal) %>% dplyr::rename(viab3 = normVal)
+
+    testTab <- viabTab2 %>%
+          left_join(select(viabTab1, patientID, viab1, concentration)) %>%
+          left_join(viabSingle) %>%
+          mutate(expViab = viab1*viab3) %>%
+          mutate(CI = viab2/expViab, meanViab2 = mean(viab2)) %>%
+          filter(!is.na(viab1), !is.na(viab2),!is.na(viab3)) %>%
+    dplyr::rename(obsViab = viab2)
+  }) %>% bind_rows()
+}) %>% bind_rows()
+
+lapply(c("Adalimumab", "CD95L"), function(x) {
+  concInter <- drug.df %>% filter(name == "Birinapant") %>% pull(concentration) %>% unique()
+  
+  pList <- lapply(unique(combiTab$patientID), function(y) {
+    combiTab <- combiTab %>% filter(patientID == y) %>% 
+      filter(drug2 %in% x)
+    
+    if(x == "Adalimumab")  {lim.plot <- 1.35} else {lim.plot <- 1.25} 
+  
+    p <- combiTab %>%
+      dplyr::rename(Expected = expViab, Observed = obsViab, Single = viab1) %>%
+      pivot_longer(cols = c(Expected, Observed, Single), names_to = "viab",
+                   values_to = "values") %>%
+      mutate(viab = factor(viab, levels = c("Observed", "Expected", "Single")),
+             drug2 = factor(drug2, levels = x), 
+             patientID = paste0(patientID, " (", diagnosis, ")")) %>%
+      arrange(desc(viab)) %>%
+      #filter(viab %in% c("Observed", "Expected")) %>%
+      ggplot(aes(x = concentration, y = values, group = viab)) +
+      geom_line(linewidth = 0.5, aes(colour = viab)) +
+      geom_point(size = 3.5, shape = 21, aes(fill = viab)) +
+      geom_hline(yintercept = 1, linetype = "dashed", colour = "black", linewidth = 0.75) +
+      geom_hline(yintercept = unique(combiTab$viab3), linetype = "dashed", colour = "darkorange", linewidth = 0.75) +
+      scale_x_log10(labels = concInter, breaks = concInter) +
+      scale_y_continuous(limits = c(0, lim.plot), breaks = c(0, 0.5, 1.0, 1.5)) +
+      xlab("Birinapant (µM)") + ylab("Viability") + #ggtitle(x) +
+      facet_wrap(. ~ patientID) +
+      theme_classic() +
+      theme(text = element_text(size = 22.5),
+            plot.title = element_text(hjust = 0.5, size = 22.5),
+            panel.background = element_rect(fill = "transparent",colour = NA),
+            plot.background = element_rect(fill = "transparent",colour = NA),
+            legend.background = element_rect(fill='transparent'),
+            strip.background = element_blank(),
+            #strip.text.x = element_text(size = 12.5),
+            panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(),
+            legend.title = element_blank(),
+            axis.line = element_line(linewidth = 1),
+            #axis.text.y = element_text(size = 12.5),
+            #axis.text.x = element_text(angle = 45, hjust=1, vjust = 1),
+            #legend.position = c(0.25, 0.25
+            legend.position = "none"
+      ) +
+      #scale_color_manual(values = c("Single" = "black", "Observed" = "#FFA000", "Expected" = "#4DB6AC"))
+      scale_color_manual(values = c("Observed" = "#F44336", "Expected" = "#1976D2", "Single" = "black")) +
+      scale_fill_manual(values = c("Observed" = "#F44336", "Expected" = "#1976D2", "Single" = "black"))
+      # p
+
+    #p
+  })
+  ggsave(plot = grid.arrange(grobs = pList, name = x), filename = paste0(opt$plot, x, "_combi_curve.png"),
+         height = 35, width = 30, units = "cm")
+  
+  grid.arrange(grobs = pList, name = x)
+})
+
+
+```
+
+#### Output session info
+```{r pressure, echo=FALSE}
+sessionInfo()
+```

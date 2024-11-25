@@ -1,0 +1,601 @@
+---
+title: "Supplemental Figure 1"
+author: "M. Pohly, J. Lu"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+#### Load libraries
+```{r warning=FALSE, message=FALSE}
+library(readxl)
+library(tidyverse)
+library(DrugScreenExplorer)
+library(jyluMisc)
+library(RColorBrewer)
+library(cowplot)
+library(parallel)
+```
+
+#### Define variables
+```{r}
+opt <- list()
+opt$drugscreen <- "data/submission/drugScreens_pseudo.RDS"
+opt$druganno <- "misc/drugList_suppl.xlsx"
+opt$plot <- "plots/SFig1/"
+```
+
+#### Load drug screen data and annotations
+```{r}
+drugList <- readRDS(opt$drugscreen)
+drugAnno <- read_excel(opt$druganno) %>%
+  dplyr::select(-Screen, -Supplier) %>% unique()
+```
+
+#### Screen A - Top 100
+```{r message=FALSE, fig.height= 7.5, fig.width=15}
+embl2014 <- drugList[["ScreenA"]] # get embl2014 data
+
+## index concentrations
+embl2014.ind <- mclapply(unique(embl2014$name), mc.cores = 4, function(x) {
+  message("Running ", x)
+  embl2014.x <- dplyr::filter(embl2014, name == x) %>% 
+    mutate(conc = as.numeric(conc))
+  subTab <- embl2014.x %>%
+    dplyr::select(name, conc, concIndex) %>% arrange(desc(conc)) %>% unique()
+ subTab$Index <- seq(1:nrow(subTab))
+  message("Adding ", nrow(subTab), " indices")
+  subTab %>% left_join(embl2014.x, by = c("name", "conc", "concIndex"))
+}) %>% bind_rows()
+
+## compute the mean druf effect per patient x drug
+viabTab <- embl2014.ind %>% dplyr::filter(!is.na(name), !is.na(diagnosis)) %>%
+  dplyr::filter(!name %in% c("PBS", "DMSO")) %>%
+  group_by(patientID, name, diagnosis) %>%
+  mutate(value = mean(viab.auc, na.rm = TRUE)) %>%
+  ungroup() %>%
+  left_join(dplyr::select(drugAnno, Drug, Target, Pathway), 
+            by = c("name" = "Drug"))
+
+topN <- 100 # define the number of drugs to plot
+colorCode <- rev(brewer.pal(6,"Blues"))[1:6] # define colour scheme
+
+## Subset to T-PLL patients
+viabTab <- dplyr::filter(viabTab, diagnosis == "T-PLL") %>%
+  mutate(Index = factor(Index)) %>%
+  dplyr::select(patientID, diagnosis, name, Target, Pathway, viab.auc, value, viab, concIndex, Index) %>%
+  unique()
+
+## reshuffle before plotting
+set.seed(100)
+viabTab <- viabTab[sample(1:nrow(viabTab),nrow(viabTab)), ]
+
+p <- lapply(unique(viabTab$diagnosis), function(n) {
+  eachTab <- filter(viabTab, diagnosis == n)
+  drugOrder <- group_by(eachTab, name) %>%
+    summarise(medVal = median(value, na.rm = TRUE)) %>%
+    arrange(medVal)
+  drugOrder <- drugOrder[c(seq(1,topN)), ]
+  eachTab <- filter(eachTab, name %in% drugOrder$name) %>%
+    mutate(name = factor(name, levels = drugOrder$name), 
+           concIndex = as.factor(concIndex)) %>%
+    group_by(name) %>% mutate(medVal = median(value, na.rm = TRUE)) %>%
+    ungroup()
+  eachTab <- eachTab %>% select(-concIndex, -Index, -viab) %>% unique()
+  p <- ggplot(eachTab, aes(x=name,y = viab.auc#, colour = Index
+                           )) +
+    geom_jitter(alpha=0.8, shape = 21, fill = "#64B5F6", size = 2, height = 0) +
+    geom_hline(yintercept = 1, linetype = "dashed") +
+    scale_color_manual(values = colorCode) +
+    ylab("Viability") + ylim(c(0,1.5)) + xlab("") +
+    theme_classic() +
+    theme(text = element_text(size = 17.5),
+          axis.text.x = element_blank(),
+          #axis.text.x = element_text(angle = 90, hjust = 1, vjust=0.5),
+          axis.line = element_line(linewidth = 0.75),
+          #legend.position = "none",
+          legend.key = element_blank(),
+          plot.title = element_text(hjust=0.5),
+          axis.ticks = element_blank(),
+          plot.margin = unit(c(0.5, 0.5, -0.5, 0), "cm"),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          legend.background = element_rect(fill='transparent'),
+          panel.background = element_rect(fill = "transparent",colour = NA),
+          plot.background = element_rect(fill = "transparent",colour = NA)) +
+    guides(colour = guide_legend(override.aes = list(size=3.5), title="Concentration\nIndex"))
+})
+## Make pathway annotation
+drugOrder <- group_by(viabTab, name) %>%
+  summarise(medVal = median(value, na.rm = TRUE)) %>%
+  arrange(medVal)
+
+drugOrder <- drugOrder[c(seq(1,topN)), ]
+
+pathTab <- select(viabTab, name, Pathway) %>% unique() %>%
+  filter(name %in% drugOrder$name) %>%
+  mutate(name = factor(name, levels = drugOrder$name), 
+         type = "pathway") %>%
+  mutate(Pathway = ifelse(Pathway %in%  c("HDAC", "HDM", "BET", "HMT", "HAT", "HMT, MYC", "NFKB, HDAC, DNA Damage"), "Epigenome", Pathway)) %>%
+  mutate(Pathway = ifelse(Pathway %in%  c("DNA Damage"), "TP53", Pathway)) %>%
+  mutate(Pathway = ifelse(Pathway %in% c("Epigenome", "Apoptosis", "PI3K-AKT-mTOR", "Autophagy", "Cell Cycle", "MAPK", 
+                                         "TP53", "JAK-STAT", "Chemo"), Pathway, "Other"))
+
+pPath <- pathTab %>%
+  mutate(Pathway = factor(Pathway, levels = c("Epigenome", "Apoptosis", "PI3K-AKT-mTOR", "Autophagy", "Cell Cycle", "MAPK", 
+                                              "TP53", "JAK-STAT", "Chemo", "Other"))) %>%
+  ggplot(aes(x = name, y = type, fill = Pathway)) +
+  geom_tile(colour = "black", size = 0.1) +
+  xlab("") + ylab("") +
+  coord_cartesian(expand = FALSE) +
+  scale_fill_manual(values = c("Epigenome" = "#4DB6AC", "Apoptosis" = "#AED581", "PI3K-AKT-mTOR" = "#1E88E5",
+                               "Autophagy" = "#EF5350", "Cell Cycle" = "#FB8C00", "MAPK" = "#FFCC80", 
+                               "TP53" = "#B39DDB", "JAK-STAT" = "#F8BBD0", "Chemo" = "#FFF9C4",
+                               "Other" = "lightgrey")) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust=0.5),
+        axis.ticks.y = element_blank(),
+        text = element_text(size = 12.5),
+        axis.text.y = element_blank(),
+        plot.margin = unit(c(-0, 0, 0, 0), "cm"), 
+        legend.key = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "transparent",colour = NA),
+        plot.background = element_rect(fill = "transparent",colour = NA), 
+        legend.background = element_rect(fill='transparent')
+  )
+
+lMain <- get_legend(p[[1]] + geom_tile(color = "black"))
+lPath <- get_legend(pPath + geom_tile(color = "black"))
+
+noLegend <- theme(legend.position = "none")
+figPlot <- plot_grid(p[[1]] + noLegend, pPath + noLegend, ncol = 1, align = "v", 
+                     rel_heights = c(3, 1.4))
+legPlot <- plot_grid(#lMain, 
+  lPath, ncol = 1, align = "v")
+
+p2 <- plot_grid(figPlot, legPlot, rel_widths = c(7, 1))
+p2
+
+ggsave(plot = p2, filename = paste0(opt$plot, "embl2014_top100.png"),
+       height = 6.15, width = 15)
+```
+
+#### Screen B - Overview
+```{r message=FALSE, fig.height= 6, fig.width=15}
+embl2016 <- drugList[["ScreenB"]]
+
+## compute the mean druf effect per patient x drug
+viabTab <- embl2016 %>% dplyr::filter(!is.na(name), !is.na(diagnosis)) %>%
+  dplyr::filter(!name %in% c("PBS", "DMSO")) %>%
+  group_by(patientID, name, diagnosis) %>%
+  mutate(value = mean(viab.auc, na.rm = TRUE)) %>%
+  ungroup() %>%
+  left_join(dplyr::select(drugAnno, Drug, Target, Pathway), 
+            by = c("name" = "Drug"))
+
+topN <- viabTab$name %>% unique() %>% length() # define the number of drugs to plot
+colorCode <- rev(brewer.pal(9,"Blues"))[1:9] # define colour scheme
+
+## Subset to T-PLL patients
+viabTab <- dplyr::filter(viabTab, diagnosis == "T-PLL") %>%
+  mutate(concIndex = factor(concIndex)) %>%
+  dplyr::select(patientID, diagnosis, name, Target, Pathway, viab.auc, value, viab, concIndex) %>%
+  unique()
+
+## reshuffle before plotting
+set.seed(100)
+viabTab <- viabTab[sample(1:nrow(viabTab),nrow(viabTab)), ]
+
+## Make ranked toxicity plot
+p <- lapply(unique(viabTab$diagnosis), function(n) {
+  eachTab <- dplyr::filter(viabTab, diagnosis == n)
+  drugOrder <- group_by(eachTab, name) %>%
+    summarise(medVal = median(value, na.rm = TRUE)) %>%
+    arrange(medVal)
+  drugOrder <- drugOrder[c(seq(1,topN)), ]
+  eachTab <- dplyr::filter(eachTab, name %in% drugOrder$name) %>%
+    mutate(name = factor(name, levels = drugOrder$name), 
+           concIndex = as.factor(concIndex)) %>%
+    group_by(name) %>% mutate(medVal = median(value, na.rm = TRUE)) %>%
+    ungroup()
+  drugOrder$rank <- seq(1:nrow(drugOrder))
+  eachTab <- left_join(eachTab, dplyr::select(drugOrder, name, rank), by = "name")
+  eachTab <- eachTab %>% select(-concIndex, -viab) %>% unique() %>%
+    mutate(viab.auc = ifelse(viab.auc > 1.5, 1.5, viab.auc))
+  
+  p <- eachTab %>% filter(viab.auc < 1.5) %>%
+    ggplot(aes(x=rank,y = viab.auc#, colour = concIndex
+                           )) +
+    geom_jitter(alpha=0.8, shape = 21, fill = "#64B5F6", size = 2, height = 0) +
+    geom_jitter(alpha=0.8, shape = 24, fill = "#64B5F6", size = 2, height = 0, 
+                data = eachTab[eachTab$viab.auc >= 1.5, ]) +
+    geom_hline(yintercept = 1, linetype = "dashed") +
+    scale_color_manual(values = colorCode) +
+    scale_x_continuous(expand = c(0.005,0),
+                       labels = c(100, 200, 300, 400),
+                       breaks = c(100, 200, 300, 400)) +
+    ylab("Viability") + ylim(c(0, 1.5)) +
+    xlab("Rank") + #ggtitle("embl2014 - Ranked Efficacy") +
+    theme_classic() +
+    theme(text = element_text(size = 25), #axis.text.x=element_blank(),
+      #axis.ticks.x=element_blank(),
+      #axis.ticks = element_blank(),
+      legend.key = element_blank(),
+      axis.line = element_line(linewidth = 0.75),
+      #legend.position = "none",
+      plot.title = element_text(hjust=0.5),
+      # plot.margin = unit(c(0.5, 0.5, 0.0, 0), "cm"),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      #legend.direction="horizontal",
+      #legend.position = c(0.2, 0.25),
+      panel.background = element_rect(fill = "transparent",colour = NA),
+      plot.background = element_rect(fill = "transparent",colour = NA),
+      legend.background = element_rect(fill='transparent')) +
+    guides(colour = guide_legend(override.aes = list(size=3.5), title="Concentration\nIndex"))
+})
+p
+ggsave(plot = p[[1]], filename = paste0(opt$plot, "embl2016_overview.png"),
+       height = 6.5, width = 15)
+```
+
+#### Screen B - Top 100
+```{r fig.height= 8, fig.width=15}
+topN <- 100
+
+p <- lapply(unique(viabTab$diagnosis), function(n) {
+  eachTab <- filter(viabTab, diagnosis == n)
+  drugOrder <- group_by(eachTab, name) %>%
+    summarise(medVal = median(value, na.rm = TRUE)) %>%
+    arrange(medVal)
+  drugOrder <- drugOrder[c(seq(1,topN)), ]
+  eachTab <- filter(eachTab, name %in% drugOrder$name) %>%
+    mutate(name = factor(name, levels = drugOrder$name), 
+           concIndex = as.factor(concIndex)) %>%
+    group_by(name) %>% mutate(medVal = median(value, na.rm = TRUE)) %>%
+    ungroup()
+  eachTab <- eachTab %>% select(-concIndex, -viab) %>% unique()
+  p <- ggplot(eachTab, aes(x=name,y = viab.auc#, colour = concIndex
+                           )) +
+    geom_jitter(alpha=0.8, shape = 21, fill = "#64B5F6", size = 2, height = 0) +
+    geom_hline(yintercept = 1, linetype = "dashed") +
+    scale_color_manual(values = colorCode) +
+    ylab("Viability") + ylim(c(0,1.2)) + xlab("") +
+    theme_classic() +
+    theme(text = element_text(size = 17.5),
+          axis.text.x = element_blank(),
+          #axis.text.x = element_text(angle = 90, hjust = 1, vjust=0.5),
+          axis.line = element_line(linewidth = 0.75),
+          #legend.position = "none",
+          legend.key = element_blank(),
+          plot.title = element_text(hjust=0.5), 
+          axis.ticks = element_blank(), 
+          plot.margin = unit(c(0.5, 0.5, -0.5, 0), "cm"), 
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          legend.background = element_rect(fill='transparent'),
+          panel.background = element_rect(fill = "transparent",colour = NA),
+          plot.background = element_rect(fill = "transparent",colour = NA)) +
+    guides(colour = guide_legend(override.aes = list(size=3.5), title="Concentration\nIndex"))
+})
+#p
+
+## Make pathway annotation
+drugOrder <- group_by(viabTab, name) %>%
+  summarise(medVal = median(value, na.rm = TRUE)) %>%
+  arrange(medVal)
+
+drugOrder <- drugOrder[c(seq(1,topN)), ]
+
+pathTab <- select(viabTab, name, Pathway) %>% unique() %>%
+  filter(name %in% drugOrder$name) %>%
+  mutate(name = factor(name, levels = drugOrder$name), 
+         type = "pathway") %>%
+  mutate(Pathway = ifelse(Pathway %in%  c("HDAC", "HDM", "BET", "HMT", "HAT", "HMT, MYC", "NFKB, HDAC, DNA Damage"), "Epigenome", Pathway)) %>%
+  mutate(Pathway = ifelse(Pathway %in%  c("DNA Damage"), "TP53", Pathway)) %>%
+  mutate(Pathway = ifelse(Pathway %in% c("Epigenome", "Apoptosis", "PI3K-AKT-mTOR", "Autophagy", "Cell Cycle", "MAPK", "Nuclear Traffic",
+                                         "TP53", "JAK-STAT", "Chemo"), Pathway, "Other"))
+
+pPath <- pathTab %>%
+  mutate(Pathway = factor(Pathway, levels = c("Epigenome", "Apoptosis", "PI3K-AKT-mTOR", "Autophagy", "Cell Cycle", "MAPK", 
+                                              "Nuclear Traffic",
+                                              "TP53", "JAK-STAT", "Chemo", "Other"))) %>%
+  ggplot(aes(x = name, y = type, fill = Pathway)) +
+  geom_tile(colour = "black", size = 0.1) +
+  xlab("") + ylab("") +
+  coord_cartesian(expand = FALSE) +
+  scale_fill_manual(values = c("Epigenome" = "#4DB6AC", "Apoptosis" = "#AED581", "PI3K-AKT-mTOR" = "#1E88E5",
+                               "Nuclear Traffic" = "#90CAF9", "Autophagy" = "#EF5350",
+                               "Cell Cycle" = "#FB8C00", "MAPK" = "#FFCC80", 
+                               "TP53" = "#B39DDB", "JAK-STAT" = "#F8BBD0", 
+                               "Chemo" = "#FFF9C4", "Other" = "lightgrey")) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust=0.5),
+        axis.ticks.y = element_blank(),
+        text = element_text(size = 12.5),
+        axis.text.y = element_blank(),
+        plot.margin = unit(c(-0, 0, 0, 0), "cm"), 
+        legend.key = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "transparent",colour = NA),
+        plot.background = element_rect(fill = "transparent",colour = NA), 
+        legend.background = element_rect(fill='transparent')
+  )
+
+lMain <- get_legend(p[[1]] + geom_tile(color = "black"))
+lPath <- get_legend(pPath + geom_tile(color = "black"))
+
+noLegend <- theme(legend.position = "none")
+figPlot <- plot_grid(p[[1]] + noLegend, pPath + noLegend, ncol = 1, align = "v", 
+                     rel_heights = c(3, 1.55))
+
+legPlot <- plot_grid(#lMain, 
+  lPath, ncol = 1, align = "v")
+
+p2 <- plot_grid(figPlot, legPlot, rel_widths = c(7, 1))
+p2
+
+ggsave(plot = p2, filename = paste0(opt$plot, "embl2016_top100.png"),
+       height = 6.75, width = 15)
+```
+
+#### Screen C - Overview
+```{r fig.height= 6, fig.width=15}
+ic50 <- drugList[["ScreenC"]]
+
+## compute the mean druf effect per patient x drug
+viabTab <- ic50 %>% dplyr::filter(!is.na(name), !is.na(diagnosis)) %>%
+  dplyr::filter(!name %in% c("PBS", "DMSO")) %>%
+  group_by(patientID, name, diagnosis) %>%
+  mutate(value = mean(viab.auc, na.rm = TRUE)) %>%
+  ungroup() %>%
+  left_join(dplyr::select(drugAnno, Drug, Target, Pathway), 
+            by = c("name" = "Drug"))
+
+topN <- viabTab$name %>% unique() %>% length() # define the number of drugs to plot
+colorCode <- rev(brewer.pal(5,"Blues"))[1:5] # define colour scheme
+
+## Subset to T-PLL patients
+viabTab <- dplyr::filter(viabTab, diagnosis == "T-PLL") %>%
+  mutate(concIndex = factor(concIndex)) %>%
+  dplyr::select(patientID, diagnosis, name, Target, Pathway, viab.auc, value, viab, concIndex) %>%
+  unique()
+
+## reshuffle before plotting
+set.seed(100)
+viabTab <- viabTab[sample(1:nrow(viabTab),nrow(viabTab)), ]
+
+## Make ranked toxicity plot
+p <- lapply(unique(viabTab$diagnosis), function(n) {
+  eachTab <- dplyr::filter(viabTab, diagnosis == n)
+  drugOrder <- group_by(eachTab, name) %>%
+    summarise(medVal = median(value, na.rm = TRUE)) %>%
+    arrange(medVal)
+  drugOrder <- drugOrder[c(seq(1,topN)), ]
+  eachTab <- dplyr::filter(eachTab, name %in% drugOrder$name) %>%
+    mutate(name = factor(name, levels = drugOrder$name), 
+           concIndex = as.factor(concIndex)) %>%
+    group_by(name) %>% mutate(medVal = median(value, na.rm = TRUE)) %>%
+    ungroup()
+  drugOrder$rank <- seq(1:nrow(drugOrder))
+  eachTab <- left_join(eachTab, dplyr::select(drugOrder, name, rank), by = "name")
+  eachTab <- eachTab %>% select(-concIndex, -viab) %>% unique() %>%
+    mutate(viab.auc = ifelse(viab.auc > 1.5, 1.5, viab.auc))
+  
+  p <- eachTab %>% filter(viab.auc < 1.5) %>%
+    ggplot(aes(x=rank,y = viab.auc#, colour = concIndex
+                           )) +
+    geom_jitter(alpha=0.8, shape = 21, fill = "#64B5F6", size = 2, height = 0) +
+    geom_jitter(alpha=0.8, shape = 24, fill = "#64B5F6", size = 2, height = 0, 
+                data = eachTab[eachTab$viab.auc >= 1.5, ]) +
+    geom_hline(yintercept = 1, linetype = "dashed") +
+    scale_color_manual(values = colorCode) + 
+    scale_x_continuous(expand = c(0.005, 0), labels = c(10, 20, 30, 40, 50, 60), 
+                       breaks = c(10, 20, 30, 40, 50, 60)) +
+    ylab("Viability") + ylim(c(0, 1.5)) + 
+    xlab("Rank") + #ggtitle("embl2014 - Ranked Efficacy") +
+    theme_classic() +
+    theme(text = element_text(size = 25), #axis.text.x=element_blank(),
+      #axis.ticks.x=element_blank(), 
+      #axis.ticks = element_blank(), 
+      legend.key = element_blank(),
+      axis.line = element_line(linewidth = 0.75),
+      #legend.position = "none",
+      plot.title = element_text(hjust=0.5), 
+      # plot.margin = unit(c(0.5, 0.5, 0.0, 0), "cm"), 
+      panel.grid.major = element_blank(), 
+      panel.grid.minor = element_blank(), 
+      #legend.direction="horizontal",
+      #legend.position = c(0.2, 0.25),
+      panel.background = element_rect(fill = "transparent",colour = NA),
+      plot.background = element_rect(fill = "transparent",colour = NA), 
+      legend.background = element_rect(fill='transparent')) +
+    guides(colour = guide_legend(override.aes = list(size=3.5), title="Concentration\nIndex"))
+})
+p
+
+ggsave(plot = p[[1]], filename = paste0(opt$plot, "ic50_overview.png"),
+       height = 6.5, width = 15)
+```
+
+#### Screen D - Overview
+```{r fig.height= 6, fig.width=15}
+cps1000 <- drugList[["ScreenD"]]
+
+## compute the mean druf effect per patient x drug
+viabTab <- cps1000 %>% dplyr::filter(!is.na(name), !is.na(diagnosis)) %>%
+  dplyr::filter(!name %in% c("PBS", "DMSO")) %>%
+  group_by(patientID, name, diagnosis) %>%
+  mutate(value = mean(viab.auc, na.rm = TRUE)) %>%
+  ungroup() %>%
+  left_join(dplyr::select(drugAnno, Drug, Target, Pathway), 
+            by = c("name" = "Drug"))
+
+topN <- viabTab$name %>% unique() %>% length() # define the number of drugs to plot
+colorCode <- rev(brewer.pal(5,"Blues"))[1:5] # define colour scheme
+
+## Subset to T-PLL patients
+viabTab <- dplyr::filter(viabTab, diagnosis == "T-PLL") %>%
+  mutate(concIndex = factor(concIndex)) %>%
+  dplyr::select(patientID, diagnosis, name, Target, Pathway, viab.auc, value, viab, concIndex) %>%
+  unique()
+
+## reshuffle before plotting
+set.seed(100)
+viabTab <- viabTab[sample(1:nrow(viabTab),nrow(viabTab)), ]
+
+## Make ranked toxicity plot
+p <- lapply(unique(viabTab$diagnosis), function(n) {
+  eachTab <- dplyr::filter(viabTab, diagnosis == n)
+  drugOrder <- group_by(eachTab, name) %>%
+    summarise(medVal = median(value, na.rm = TRUE)) %>%
+    arrange(medVal)
+  drugOrder <- drugOrder[c(seq(1,topN)), ]
+  eachTab <- dplyr::filter(eachTab, name %in% drugOrder$name) %>%
+    mutate(name = factor(name, levels = drugOrder$name), 
+           concIndex = as.factor(concIndex)) %>%
+    group_by(name) %>% mutate(medVal = median(value, na.rm = TRUE)) %>%
+    ungroup()
+  drugOrder$rank <- seq(1:nrow(drugOrder))
+  eachTab <- left_join(eachTab, dplyr::select(drugOrder, name, rank), by = "name")
+  eachTab <- eachTab %>% select(-concIndex, -viab) %>% unique() %>%
+    mutate(viab.auc = ifelse(viab.auc > 1.5, 1.5, viab.auc))
+  
+  p <- eachTab %>% filter(viab.auc < 1.5) %>%
+    ggplot(aes(x=rank,y = viab.auc#, colour = concIndex
+                           )) +
+    geom_jitter(alpha=0.8, shape = 21, fill = "#64B5F6", size = 2, height = 0) +
+    geom_jitter(alpha=0.8, shape = 24, fill = "#64B5F6", size = 2, height = 0, 
+                data = eachTab[eachTab$viab.auc >= 1.5, ]) +
+    geom_hline(yintercept = 1, linetype = "dashed") +
+    scale_color_manual(values = colorCode) + 
+    scale_x_continuous(expand = c(0.005, 0), labels = c(10, 20, 30, 40, 50, 60), 
+                       breaks = c(10, 20, 30, 40, 50, 60)) +
+    ylab("Viability") + ylim(c(0, 1.5)) + 
+    xlab("Rank") + #ggtitle("embl2014 - Ranked Efficacy") +
+    theme_classic() +
+    theme(text = element_text(size = 25), #axis.text.x=element_blank(),
+      #axis.ticks.x=element_blank(), 
+      #axis.ticks = element_blank(), 
+      legend.key = element_blank(),
+      axis.line = element_line(linewidth = 0.75),
+      #legend.position = "none",
+      plot.title = element_text(hjust=0.5), 
+      # plot.margin = unit(c(0.5, 0.5, 0.0, 0), "cm"), 
+      panel.grid.major = element_blank(), 
+      panel.grid.minor = element_blank(), 
+      #legend.direction="horizontal",
+      #legend.position = c(0.2, 0.25),
+      panel.background = element_rect(fill = "transparent",colour = NA),
+      plot.background = element_rect(fill = "transparent",colour = NA), 
+      legend.background = element_rect(fill='transparent')) +
+    guides(colour = guide_legend(override.aes = list(size=3.5), title="Concentration\nIndex"))
+})
+p
+
+ggsave(plot = p[[1]], filename = paste0(opt$plot, "cps1000_overview.png"),
+       height = 6.5, width = 15)
+```
+
+#### Screen E - Overview
+```{r fig.height= 6, fig.width=15}
+t_lymphoma <- drugList[["ScreenE"]]
+
+## Define drug combinations
+drugComb <- c("Birinapant|Necrostatin-1 (25)", "Birinapant|QVD-Oph (25)", "Birinapant|Necrostatin-1 (25)|QVD-Oph (25)", 
+              "Birinapant|Necrostatin-1 (12.5)", "Birinapant|QVD-Oph (12.5)", "Birinapant|Necrostatin-1 (12.5)|QVD-Oph (12.5)", 
+              "GDC-0152|Necrostatin-1 (25)", "GDC-0152|QVD-Oph (25)", "GDC-0152|Necrostatin-1 (25)|QVD-Oph (25)", 
+              "GDC-0152|Necrostatin-1 (12.5)", "GDC-0152|QVD-Oph (12.5)", "GDC-0152|Necrostatin-1 (12.5)|QVD-Oph (12.5)", 
+              "Birinapant|Ipatasertib (2)", "Birinapant|Ruxolitinib (2)", "Birinapant|Bafilomycin_A1 (0.08)", 
+              "Birinapant|NSA (0.8)", "Birinapant|NSA (2)", 
+              "Birinapant|NSA (5)", "Birinapant|NSA (0.8)|QVD-Oph (25)", "Birinapant|NSA (2)|QVD-Oph (25)", 
+              "Birinapant|NSA (5)|QVD-Oph (25)", #"Ibrutinib|Compound 26 (0.1)",
+              "Birinapant + Ipatasertib 2µM", "Birinpant + Ruxolitinib 2µM", "Birinapant + Venetoclax 0.04µM", 
+              "Birinapant + Dacinostat 0.04µM", "Birinapant + Bafilomycin A1 0.08µM", "Birinapant + NSA 0.8µM",
+              "Birinapant + NSA 0.8µM + QVD-Oph 25µM", "Birinapant + NSA 2µM",  "Birinapant + NSA 5µM", 
+              "Birinapant + NSA 12.5µM", "Birinapant + NSA 2µM + QVD-Oph 25µM", "Birinapant + NSA 5μM + QVD-Oph 25μM", 
+              "Birinapant + NSA 12.5µM + QVD-Oph 25µM",
+              "DMSO", "empty", "Necrostatin-1|QVD-Oph")
+
+## compute the mean druf effect per patient x drug
+viabTab <- t_lymphoma %>% dplyr::filter(!is.na(name), !is.na(diagnosis)) %>%
+  dplyr::filter(!name %in% c("PBS", "DMSO", drugComb)) %>%
+  dplyr::filter(!c(name %in% c("Birinapant", "QVD-Oph") & screen == "T_lymphoma_combi")) %>% # remove birinapant at 5 concentrations
+  group_by(patientID, name, diagnosis) %>%
+  mutate(value = mean(viab.auc, na.rm = TRUE)) %>%
+  ungroup() %>%
+  left_join(dplyr::select(drugAnno, Drug, Target, Pathway), 
+            by = c("name" = "Drug"))
+
+topN <- viabTab$name %>% unique() %>% length() # define the number of drugs to plot
+colorCode <- rev(brewer.pal(9,"Blues"))[1:9] # define colour scheme
+colorCode[[10]] <- colorCode[[9]]
+colorCode[[9]] <- "grey80"
+
+## Subset to T-PLL patients
+viabTab <- dplyr::filter(viabTab, diagnosis == "T-PLL") %>%
+  mutate(concIndex = factor(concIndex)) %>%
+  dplyr::select(patientID, diagnosis, name, Target, Pathway, viab.auc, value, viab, concIndex) %>%
+  unique()
+
+## reshuffle before plotting
+set.seed(100)
+viabTab <- viabTab[sample(1:nrow(viabTab),nrow(viabTab)), ]
+
+## Make ranked toxicity plot
+p <- lapply(unique(viabTab$diagnosis), function(n) {
+  eachTab <- dplyr::filter(viabTab, diagnosis == n)
+  drugOrder <- group_by(eachTab, name) %>%
+    summarise(medVal = median(value, na.rm = TRUE)) %>%
+    arrange(medVal)
+  drugOrder <- drugOrder[c(seq(1,topN)), ]
+  eachTab <- dplyr::filter(eachTab, name %in% drugOrder$name) %>%
+    mutate(name = factor(name, levels = drugOrder$name), 
+           concIndex = as.factor(concIndex)) %>%
+    group_by(name) %>% mutate(medVal = median(value, na.rm = TRUE)) %>%
+    ungroup()
+  drugOrder$rank <- seq(1:nrow(drugOrder))
+  eachTab <- left_join(eachTab, dplyr::select(drugOrder, name, rank), by = "name")
+  eachTab <- eachTab %>% select(-concIndex, -viab) %>% unique() %>%
+    mutate(viab.auc = ifelse(viab.auc > 1.5, 1.5, viab.auc))
+  
+  p <- eachTab %>% filter(viab.auc < 1.5) %>%
+    ggplot(aes(x=rank,y = viab.auc#, colour = concIndex
+                           )) +
+    geom_jitter(alpha=0.8, shape = 21, fill = "#64B5F6", size = 2, height = 0) +
+    geom_jitter(alpha=0.8, shape = 24, fill = "#64B5F6", size = 2, height = 0, 
+                data = eachTab[eachTab$viab.auc >= 1.5, ]) +
+    geom_hline(yintercept = 1, linetype = "dashed") +
+    scale_color_manual(values = colorCode) + 
+    scale_x_continuous(expand = c(0.01,0), labels = c(10, 20, 30, 40, 50), 
+                       breaks = c(10, 20, 30, 40, 50)) +
+    ylab("Viability") + ylim(c(0, 1.5)) + 
+    xlab("Rank") + #ggtitle("embl2014 - Ranked Efficacy") +
+    theme_classic() +
+    theme(text = element_text(size = 25), #axis.text.x=element_blank(),
+      #axis.ticks.x=element_blank(), 
+      #axis.ticks = element_blank(), 
+      legend.key = element_blank(),
+      axis.line = element_line(linewidth = 0.75),
+      #legend.position = "none",
+      plot.title = element_text(hjust=0.5), 
+      # plot.margin = unit(c(0.5, 0.5, 0.0, 0), "cm"), 
+      panel.grid.major = element_blank(), 
+      panel.grid.minor = element_blank(), 
+      #legend.direction="horizontal",
+      #legend.position = c(0.2, 0.25),
+      panel.background = element_rect(fill = "transparent",colour = NA),
+      plot.background = element_rect(fill = "transparent",colour = NA), 
+      legend.background = element_rect(fill='transparent')) +
+    guides(colour = guide_legend(override.aes = list(size=3.5), title="Concentration\nIndex"))
+})
+p
+
+ggsave(plot = p[[1]], filename = paste0(opt$plot, "validation_overview.png"),
+       height = 6.5, width = 15)
+```
+
+#### Output session info
+```{r}
+sessionInfo()
+```

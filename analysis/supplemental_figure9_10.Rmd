@@ -1,0 +1,567 @@
+---
+title: "Supplemental Figure 9 & 10"
+author: "M. Pohly"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Load libraries
+```{r warning=FALSE, message=FALSE}
+library(tidyverse)
+library(scran)
+library(scater)
+library(BiocParallel)
+library(gridExtra)
+library(ComplexHeatmap)
+library(circlize)
+library(ggbeeswarm)
+library(readxl)
+library(parallel)
+library(edgeR)
+library(ggridges)
+
+ncores <- 10
+mcparam <- MulticoreParam(workers=ncores)
+register(mcparam)
+```
+
+## Define variables
+```{r}
+opt <- list()
+opt$sce <- "data/submission/TFlow_split_complete.RDS"
+opt$types <- "data/submission/TFlow_celltypes.csv"
+opt$plot <- "plots/SFig9_10/"
+
+## Set theme
+lgd <-  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5), 
+        text = element_text(size = 15),
+        panel.background = element_rect(fill = "transparent",colour = NA),
+        plot.background = element_rect(fill = "transparent",colour = NA), 
+        legend.background = element_rect(fill='transparent',colour = NA), 
+        strip.background = element_blank(), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+```
+
+## Load data
+```{r}
+## Load single-cell experiment
+sce <- readRDS(opt$sce)
+sce.unstim <- sce[["unstim"]]
+sce.stim <- sce[["stim"]]
+rm(sce) # free-up the memory
+
+## Load cell type annotation
+types <- read.csv(opt$types) %>%
+  mutate(uniqueBarcode = as.character(uniqueBarcode)) %>%
+  mutate(celltype_broad = ifelse(celltype %in% c("CD16- NK-cell", "CD16+ NK-cell"), "NK-Cells", celltype)) %>%
+  mutate(celltype_broad = ifelse(celltype %in% c("T-reg", "gd T-cell", "naive CD4 T-cell", "naive CD8 T-cell", "CD8 T-emra", "CD8 effector memory T-cell", 
+                                                 "CD8 central memory T-cell", "CD7+ memory CD4 T-emra", "CD7+ effector memory CD4 T-cell", 
+                                                 "CD7+ central memory CD4 T-cell", "CD7- memory CD4 T-emra", "CD7- effector memory CD4 T-cell", 
+                                                 "CD7- central memory CD4 T-cell"), "T-Cells", celltype_broad)) %>%
+  mutate(celltype_broad = ifelse(celltype %in% c("naive B-cell", "memory B-cell"), "B-Cells", celltype_broad)) %>%
+  mutate(celltype = ifelse(celltype %in% c("CD7- effector memory CD4 T-cell", "CD7+ effector memory CD4 T-cell"), "CD4 EM T-cell", celltype), 
+         celltype = ifelse(celltype %in% c("CD7- central memory CD4 T-cell", "CD7+ central memory CD4 T-cell"), "CD4 CM T-cell", celltype), 
+         celltype = ifelse(celltype %in% c("CD8 central memory T-cell"), "CD8 CM T-cell", celltype),
+         celltype = ifelse(celltype %in% c("CD8 effector memory T-cell"), "CD8 EM T-cell", celltype),
+         celltype = ifelse(celltype %in% c("CD7- effector memory CD4 T-cell", "CD7+ effector memory CD4 T-cell"), "CD4 EM T-cell", celltype),
+         celltype = ifelse(celltype %in% c("CD7- memory CD4 T-emra", "CD7+ memory CD4 T-emra"), "CD4 T-emra", celltype))
+
+
+
+ld <- 1.5
+cl3 <- 2.5
+cl3small <- 2.25
+apo <- 1.45
+il2 <- 1.5
+tnf  <- 1.5
+ifng <- 1.25
+ki67 <- 1.5
+gzmb <- 1.5
+gmcsf <- 1.5
+il10 <- 1.5
+gzmb <- 1.5
+
+```
+
+## Analysis
+#### Heatmap with phenotype of T-cells
+```{r}
+plotTab <- ggcells(sce.unstim, features = c("SSCA", "LD", "Apotracker", "cleaved_caspase_3", "FSCA", "Time"), exprs_values = "exprs")[[1]]
+
+ld <- 1.5
+cl3 <- 2.5
+cl3small <- 2.25
+apo <- 1.45
+
+brc.sub <- plotTab %>%
+  left_join(types, by = "uniqueBarcode") %>% 
+  filter(!celltype_broad %in% c("debris"), !is.na(celltype_broad), Treatment %in% c("DMSO")) %>%
+  mutate(celltype_broad = ifelse(celltype_broad %in% c("T-PLL", "T-LGL"), "Lymphoma Cells", celltype_broad)) %>%
+  mutate(cellDeath = ifelse(LD > ld | cleaved_caspase_3 > cl3 | Apotracker > apo, "dead", "live"), 
+         cellDeath = ifelse(FSCA < 750000, "dead", cellDeath),
+         cellDeath = ifelse(FSCA < 1500000 & cleaved_caspase_3 > cl3small, "apoptotic", cellDeath),
+         cellDeath = ifelse(cellDeath == "dead" & cleaved_caspase_3 > cl3, "apoptotic", cellDeath)) %>%
+  filter(cellDeath == "live") %>% pull(uniqueBarcode)
+
+## Show the surface phenotype of T-PLL
+
+## Subset to remove stimulation
+sce.x <- sce.unstim[, sce.unstim$Stimulation == FALSE & sce.unstim$uniqueBarcode %in% brc.sub]
+
+colData(sce.x) <- colData(sce.x) %>%
+  data.frame() %>%
+  left_join(types, by = "uniqueBarcode") %>%
+  mutate(celltype = ifelse(Diagnosis_simple %in% c("T-PLL", "T-LGL"), patientID, celltype)) %>%
+  DataFrame()
+
+summed <- summarizeAssayByGroup(sce.x, ids = colData(sce.x)[,c("celltype")], statistics = "median", assay.type = "exprs") # get raw counts and sum them up
+plotMat <- assay(summed, "median") %>% as.matrix()
+
+## By patient
+#plotMat <- scale(plotMat)
+
+colData(sce.x) %>%
+  data.frame() %>%
+  select(patientID, Diagnosis_simple) %>%
+  unique()
+
+## By Marker
+#plotMat <- t(scale(t(plotMat)))
+
+patOrder <- colData(sce.x) %>% data.frame() %>%
+  select(Diagnosis_simple, celltype) %>%
+  mutate(Disease = ifelse(Diagnosis_simple %in% c("T-PLL", "T-LGL"), "lymphoma", "healthy")) %>%
+  unique()
+
+adtSub <- c("CD95", "CD8", "CD3", "GranzymeB", "TCRgd", "PD1", "HLADR", "CD5", "CD7", "CD10", "CD25", "CD4", "CD127", "CCR7",
+            "CD27", "CD30", "CD45", "CD45RA", "CD19", "CD16", "CD56")
+
+
+
+pList <- lapply(c("healthy", "lymphoma"), function(x) {
+  patSub <- patOrder %>% filter(Disease == x) %>% pull(celltype)
+
+  plotMat <- plotMat[adtSub, patSub]
+  pHeat <- Heatmap(plotMat,
+        cluster_rows = TRUE, clustering_method_rows = "ward.D2",
+        cluster_columns = TRUE, clustering_method_columns = "ward.D2",
+        #col=colorRamp2(c(-2, 0, 2), colors = c("#1976D2", "white", "#F44336")),
+        col=colorRamp2(c(0, max(plotMat[adtSub, ])), colors = c("grey90", "#F44336")),
+        #rect_gp = gpar(col = "black", lwd = 0.1),
+        heatmap_legend_param = list(title_gp = gpar(fontsize = 12.5)),
+        border = TRUE, name = "Median Expr.",
+        column_title = "")
+  pHeat
+
+})
+pHeat <- pList[[1]] + pList[[2]]
+pHeat
+png(file=paste0(opt$plot, "markerExpr_Tcells.png"),
+    height = 12.5, width = 22.5, res = 600, units = "cm", bg = "transparent")
+draw(pHeat, background = "transparent")
+dev.off()
+```
+
+#### Overview UMAPs - Unstimulated
+```{r}
+plotTab <- ggcells(sce.unstim, features = c("SSCA", "LD", "Apotracker", "cleaved_caspase_3", "FSCA", "Time"), exprs_values = "exprs")[[1]]
+
+## Randomly sample to reduce overplotting
+set.seed(100)
+plotTab <- plotTab[sample(1:nrow(plotTab), nrow(plotTab)), ]
+
+## Plot cell types
+p1 <- plotTab %>% 
+  filter(!is.na(UMAP_FSCA.1)) %>%
+  left_join(types, by = "uniqueBarcode") %>%
+  filter(!celltype %in% c("debris"), !is.na(celltype), 
+         Treatment %in% c("DMSO", "Birinapant", "Selinexor", "QVDOph", "Birinapant|QVDOph")) %>%
+  ggplot(aes(x = UMAP_FSCA.1, y = UMAP_FSCA.2, colour = celltype)) +
+  geom_point(size = 0.1) +
+  xlab("UMAP1") + ylab("UMAP2") +
+  lgd +
+  theme_void() +
+  theme(axis.ticks = element_blank(), 
+        axis.text = element_blank(), 
+        legend.position = "none") +
+  scale_colour_manual(values = c("T-LGL" = "#A5D6A7", "T-PLL" = "#64B5F6","memory B-cell" = "#FFA000", 
+                                 "naive B-cell" = "#FFD45F", "T-reg" = "#AD1457", "gd T-cell" = "#F44336",
+                                 "CD16- NK-cell" = "grey70", "CD16+ NK-cell" = "grey40", "naive CD4 T-cell" = "#43A047", 
+                                 "CD4 T-emra" = "#4DB6AC", "CD4 EM T-cell" = "#80DEEA", "CD4 CM T-cell" = "#283593",
+                                 "naive CD8 T-cell" = "#F8BBD0", "CD8 T-emra" = "#AB47BC", "CD8 CM T-cell" = "#D1C4E9", 
+                                 "CD8 EM T-cell" = "#9575CD"
+                               ))
+
+p1
+
+ggsave(plot = p1, filename = paste0(opt$plot, "TFlow_umap_cellsubtypes.png"), 
+       height = 15, width = 15, units = "cm")
+
+
+## Plot patientID
+p <- plotTab %>%
+  filter(!is.na(UMAP_FSCA.1)) %>%
+  left_join(types, by = "uniqueBarcode") %>%
+  filter(!celltype %in% c("debris"), !is.na(celltype), 
+         Treatment %in% c("DMSO", "Birinapant", "Selinexor", "QVDOph", "Birinapant|QVDOph")) %>%
+  ggplot(aes(x = UMAP_FSCA.1, y = UMAP_FSCA.2, colour = patientID)) +
+  geom_point(size = 0.1) +
+  xlab("UMAP1") + ylab("UMAP2") +
+  lgd + #scale_colour_viridis_c() +
+  theme_void() +
+  theme(axis.ticks = element_blank(), 
+        axis.text = element_blank(), 
+        legend.position = "none")
+p
+
+ggsave(plot = p, filename = paste0(opt$plot, "TFlow_umap_patients.png"), 
+       height = 15, width = 15, units = "cm")
+
+
+```
+
+#### Show cell death frequency relative to DMSO
+```{r message=FALSE}
+plotTab <- ggcells(sce.unstim, features = c("CD3", "LD", "Apotracker", "cleaved_caspase_3", "FSCA", "CD25", "CD127"), exprs_values = "exprs")[[1]]
+
+# Rare combinations of celltype x patient x treatment will be exclduded from the analysis, as this makes it more susceptible to noise. 
+countSub <- plotTab %>% 
+  left_join(types, by = "uniqueBarcode") %>%
+  dplyr::count(patientID, Treatment, celltype_broad) %>%
+  filter(n < 100) %>%
+  mutate(patTreatType = paste0(patientID, "_", Treatment, "_", celltype_broad)) %>%
+  pull(patTreatType) %>% unique()
+
+plotTab %>%
+  select(patientID, Treatment) %>% unique() %>%
+  dplyr::count(Treatment)
+
+compDrug <- c("Selinexor", "Birinapant_low", "Birinapant", 
+              "Birinapant|QVDOph", "QVDOph",
+              "DMSO_stim", "Birinapant_low_stim")
+
+ld <- 1.5
+cl3 <- 2.5
+cl3small <- 2.25
+apo <- 1.45
+
+testTab <- mclapply(unique(plotTab$patientID), mc.cores = ncores, function(x) {
+  testTab <- plotTab %>% filter(patientID == x) %>%
+  left_join(types, by = "uniqueBarcode") %>% 
+  mutate(celltype_broad = ifelse(celltype_broad %in% c("T-PLL", "T-LGL"), "Lymphoma Cells", celltype_broad)) %>%
+  mutate(cellDeath = ifelse(LD > ld | cleaved_caspase_3 > cl3 | Apotracker > apo, "dead", "live"), 
+                  cellDeath = ifelse(FSCA < 750000, "dead", cellDeath),
+         cellDeath = ifelse(FSCA < 1500000 & cleaved_caspase_3 > cl3small, "apoptotic", cellDeath),
+         cellDeath = ifelse(cellDeath == "dead" & cleaved_caspase_3 > cl3, "apoptotic", cellDeath)) %>%
+  mutate(patTreatType = paste0(patientID, "_", Treatment, "_", celltype_broad)) %>%
+  filter(!patTreatType %in% countSub) %>% # filter only for combinations with enough cells
+  group_by(patientID, celltype_broad, Treatment) %>%
+  mutate(nCells = length(uniqueBarcode)) %>%
+  ungroup() %>%
+  group_by(patientID, celltype_broad, cellDeath, Treatment) %>%
+  mutate(nCellsSub = length(uniqueBarcode), rel = nCellsSub / nCells) %>%
+  select(patientID, Diagnosis_simple, celltype_broad, Treatment, cellDeath, rel) %>% unique() %>%
+  pivot_wider(names_from = "cellDeath", values_from = "rel") %>%
+  mutate(Treatment = factor(Treatment, levels = c("DMSO", compDrug))) %>%
+  pivot_longer(cols = c("live", "apoptotic", "dead"), 
+               names_to = "cellDeath", values_to = "rel") %>%
+  mutate(rel = ifelse(is.na(rel), 0, rel))
+
+}) %>% bind_rows()
+
+## Normalize to DMSO
+viabTab <- mclapply(unique(testTab$patientID), mc.cores = ncores, function(x) {
+  lapply(c("Lymphoma Cells", "B-Cells", "T-Cells", "NK-Cells"), function(z) {
+    lapply(c("live", "apoptotic", "dead"), function(y) {
+      message(x)
+      message(z)
+      message(y)
+      
+      testTab <- testTab %>% filter(patientID == x, cellDeath == y, celltype_broad == z)
+      
+      dmso.val <- unique(testTab[testTab$Treatment == "DMSO", ]$rel)
+      
+      if(length(dmso.val == 1)) {
+        testTab %>% mutate(viabNorm = rel / dmso.val, 
+                           viabDiff = rel - dmso.val)
+      } else {
+        testTab %>% mutate(viabNorm = NA)
+      }
+    }) %>% bind_rows()
+  }) %>% bind_rows()
+}) %>% bind_rows()
+
+viabTab.back <- viabTab
+
+compDrug <- c("Selinexor", "Birinapant_low", "Birinapant", 
+              "Birinapant|Q-VD-OPh", "Q-VD-OPh",
+              "DMSO_stim", "Birinapant_low_stim")
+
+# Out of range observations
+viabTab <- viabTab %>% mutate(viabNorm = ifelse(cellDeath == "live" & viabNorm > 1.25, 1.25, viabNorm), 
+                              viabNorm = ifelse(cellDeath == "apoptotic" & viabNorm > 5, 5, viabNorm), 
+                              viabNorm = ifelse(cellDeath == "dead" & viabNorm > 5, 5, viabNorm)) %>%
+  mutate(Treatment = str_replace(string = Treatment, pattern = "QVDOph", replacement = "Q-VD-OPh"))
+
+viabTabOOR <- viabTab[viabTab$cellDeath == "live" & viabTab$viabNorm == 1.25 & viabTab$Treatment %in% c("Birinapant", "Selinexor", "Q-VD-OPh", "Birinapant|Q-VD-OPh"), ]
+viabTabOOR <- viabTabOOR[!is.na(viabTabOOR$patientID), ]
+
+## Plot normalized viability
+p <- viabTab %>%
+  filter(cellDeath == "live", !is.na(viabNorm)) %>%
+  filter(Treatment %in% c("Selinexor", "Birinapant", "Q-VD-OPh", "Birinapant|Q-VD-OPh"
+                          )) %>%
+  mutate(Treatment = factor(Treatment, levels = compDrug)) %>%
+  ggplot(aes(x = Treatment, y = viabNorm, fill = Treatment)) +
+  geom_boxplot(alpha = 0.6) +
+  geom_beeswarm(cex = 3.25, size = 2.5, shape = 21, data = viabTab[viabTab$viabNorm < 1.25 & viabTab$cellDeath == "live" & viabTab$Treatment %in% c("Selinexor", "Birinapant", "Q-VD-OPh", "Birinapant|Q-VD-OPh") & !is.na(viabTab$viabNorm), ]) +
+  geom_beeswarm(cex = 3, size = 2.25, shape = 24, data = viabTabOOR) +
+  #geom_text(aes(label = patientID)) +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  xlab("") + ylab("Living Cells") +
+  lgd + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1), 
+              legend.position = "none", 
+              text = element_text(size = 20), 
+              panel.border = element_rect(linewidth = 1, fill = "transparent")) +
+  facet_wrap(. ~ celltype_broad, nrow = 1) +
+  scale_fill_manual(values = c("Birinapant" = "#AD1457", "Selinexor" = "#FFD45F", "Q-VD-OPh" = "#64B5F6", 
+                               "Birinapant|Q-VD-OPh" = "#43A047"))
+p
+
+ggsave(plot = p, filename = paste0(opt$plot, "live_viabNorm_celltypes.png"), 
+       height = 14, width = 30, units = "cm")
+
+```
+
+#### Overview UMAPs - Stimulated
+```{r}
+
+plotTab <- ggcells(sce.stim, features = c("CD3", "FSCA", "SSCA", "Ki67", "Apotracker", "LD", "cleaved_caspase_3", 
+                                     "IL2", "IL10", "TNF", "IFNg", "GMCSF"), exprs_values = "exprs")[[1]]
+
+## Plot patientID
+p <- plotTab %>%
+  filter(!is.na(UMAP_FSCA.1)) %>%
+  left_join(types, by = "uniqueBarcode") %>%
+  filter(!celltype %in% c("debris"), !is.na(celltype)) %>%
+  ggplot(aes(x = UMAP_FSCA.1, y = UMAP_FSCA.2, colour = patientID)) +
+  geom_point(size = 0.1) +
+  xlab("UMAP1") + ylab("UMAP2") +
+  lgd + #scale_colour_viridis_c() +
+  theme_void() +
+  theme(axis.ticks = element_blank(), 
+        axis.text = element_blank(), 
+        legend.position = "none")
+p
+
+ggsave(plot = p, filename = paste0(opt$plot, "TFlow_umap_patients_stim.png"), 
+       height = 15, width = 15, units = "cm")
+
+## Plot celltype
+p <- plotTab %>%
+  filter(!is.na(UMAP_FSCA.1)) %>%
+  left_join(types, by = "uniqueBarcode") %>%
+  filter(!celltype %in% c("debris"), !is.na(celltype)) %>%
+  mutate(celltype_broad = ifelse(celltype_broad %in% c("T-PLL", "T-LGL"), "Lymphoma Cells", celltype_broad)) %>%
+  ggplot(aes(x = UMAP_FSCA.1, y = UMAP_FSCA.2, colour = celltype)) +
+  geom_point(size = 0.1) +
+  xlab("UMAP1") + ylab("UMAP2") +
+  lgd + #scale_colour_viridis_c() +
+  theme_void() +
+  theme(axis.ticks = element_blank(), 
+        axis.text = element_blank(), 
+        legend.position = "none") +
+  scale_colour_manual(values = c("T-LGL" = "#A5D6A7", "T-PLL" = "#64B5F6","memory B-cell" = "#FFA000", 
+                                 "naive B-cell" = "#FFD45F", "T-reg" = "#AD1457", "gd T-cell" = "#F44336",
+                                 "CD16- NK-cell" = "grey70", "CD16+ NK-cell" = "grey40", "naive CD4 T-cell" = "#43A047", 
+                                 "CD4 T-emra" = "#4DB6AC", "CD4 EM T-cell" = "#80DEEA", "CD4 CM T-cell" = "#283593",
+                                 "naive CD8 T-cell" = "#F8BBD0", "CD8 T-emra" = "#AB47BC", "CD8 CM T-cell" = "#D1C4E9", 
+                                 "CD8 EM T-cell" = "#9575CD"
+                               ))
+p
+
+ggsave(plot = p, filename = paste0(opt$plot, "TFlow_umap_cellsubtype_stim.png"), 
+       height = 15, width = 15, units = "cm")
+
+
+
+
+
+brc.live <- plotTab %>%
+    left_join(types, by = "uniqueBarcode") %>% 
+   mutate(cellDeath = ifelse(LD > ld |  cleaved_caspase_3 > cl3 | Apotracker > apo, "dead", "live"),
+         cellDeath = ifelse(FSCA < 750000, "dead", cellDeath),
+         cellDeath = ifelse(FSCA < 1500000 & cleaved_caspase_3 > cl3small, "apoptotic", cellDeath),
+         cellDeath = ifelse(cellDeath == "dead" & cleaved_caspase_3 > cl3, "apoptotic", cellDeath)) %>%
+  filter(cellDeath %in% c("live")) %>%
+  pull(uniqueBarcode) %>% unique()
+
+
+```
+
+#### Cytokine Response - Box plots
+```{r message=FALSE, warning=FALSE}
+sce.x <- sce.stim
+compDrug <- c("Birinapant_low_stim")
+
+
+colData(sce.x) <- colData(sce.x) %>%
+  data.frame() %>%
+  left_join(types, by = "uniqueBarcode") %>%
+  mutate(Treatment = factor(Treatment, levels = c("DMSO_stim", compDrug)), 
+         cluster_id = celltype_broad, 
+         celltype_broad = ifelse(celltype_broad %in% c("T-PLL", "T-LGL"), "Lymphoma Cells", celltype_broad)) %>%
+  DataFrame()
+
+testTreat <- c("Birinapant_low_stim")
+cellSub <- c("Lymphoma Cells", "T-Cells", "B-Cells", "NK-Cells")
+adtSub <- c("IL2", "GMCSF", "TNF", "IFNg")
+
+## For some reason it still thinks there are NAs
+sce.x <- sce.x[, !is.na(sce.x$celltype_broad)]
+sce.x <- sce.x[, sce.x$uniqueBarcode %in% brc.live]
+
+avgTab <- lapply(testTreat, function(z) {
+  message(paste0("Fitting model for ", z))
+  lapply(cellSub, function(x) {
+    message(paste0("Celltype ", x))
+    
+    sce.x <- sce.x[, sce.x$celltype_broad == x & sce.x$uniqueBarcode %in% brc.live]
+    
+    ## Set-up model formulas
+    meta.df <- unique(dplyr::select(data.frame(colData(sce.x)), patientID, Treatment, Stimulation))
+    design <- stats::model.matrix(~ patientID + Treatment, meta.df)
+    frml <- diffcyt::createFormula(meta.df, cols_fixed = c("patientID", "Treatment"))
+    
+    ## Get median counts
+    summed <- summarizeAssayByGroup(sce.x, ids = colData(sce.x)[,c("patientID", "Treatment")],
+                                    statistics = "median", assay.type = "exprs") # get raw counts and sum them up
+    colData(summed)$Treatment <- factor(colData(summed)$Treatment, levels = c("DMSO_stim", compDrug))
+    
+    mat <- assay(summed, "median") %>% as.matrix()
+    colnames(mat) <- paste0(summed$patientID, ".", summed$Treatment)
+    
+    ## For every marker assemble the corresponding data frame and fit a linear model
+    lapply(adtSub, function(u) {
+      df <- data.frame(medianExpr = mat[u, ], patTreat = colnames(mat), ncells = summed$ncells) %>%
+        separate(col = "patTreat", into = c("patientID", "Treatment"), sep = "\\.")
+      
+      testTab <- frml$data %>% left_join(df, by = c("patientID", "Treatment")) %>%
+        #dplyr::rename(y = medianExpr) %>%
+        mutate(Treatment = factor(Treatment, levels = c("DMSO_stim", compDrug)), 
+               celltype = x, adt = u) %>%
+        filter(!ncells < 100) %>% unique()
+      testTab
+      
+     }) %>% bind_rows()
+  }) %>% bind_rows()
+}) %>% bind_rows() #%>% mutate(p.adj = p.adjust(p, method = "BH"))
+
+
+##
+lapply(c("T-Cells"), function(y) {
+  lapply(c("IL2", "TNF", "IFNg", "GMCSF"), function(x) {
+  p <- avgTab %>%
+    filter(adt == x) %>%
+    mutate(Treatment = ifelse(Treatment == "DMSO_stim", "DMSO", "Birinapant"), 
+           Treatment = factor(Treatment, levels = c("DMSO", "Birinapant"))) %>%
+    ggplot(aes(x = Treatment, y = medianExpr, fill = Treatment)) +
+    geom_boxplot(alpha = 0.6) +
+    geom_line(linewidth = 0.25, aes(group = patientID)) +
+    geom_beeswarm(size = 3, shape = 21, cex = 3) +
+    xlab("") + ylab(paste0("Median Expr. of Living Cells")) + ggtitle(x) +
+    lgd + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1), 
+              legend.position = "none", 
+              text = element_text(size = 17.5), 
+              panel.border = element_rect(linewidth = 1, fill = "transparent"), 
+              axis.text = element_text(size = 17.5)) +
+  scale_fill_manual(values = c("Birinapant" = "#AD1457", "DMSO" = "grey70")) +
+      facet_wrap(. ~ celltype, nrow = 1)
+  
+  ggsave(plot = p, filename = paste0(opt$plot, x, "_median_expr.png"),
+         height = 12, width = 30, units = "cm")
+  p
+})
+})
+```
+
+#### Ki67 and Cytokine Response - Histograms
+```{r message=FALSE, warning=FALSE}
+plotTab.1 <- ggcells(sce.unstim[, sce.unstim$Treatment %in% c("DMSO", "Birinapant")], features = c("FSCA", "Ki67", "IL2", "IL10", "TNF", "IFNg", "GMCSF", "LD", "cleaved_caspase_3", "Apotracker", "PD1"), exprs_values = "exprs")[[1]]
+plotTab.2 <- ggcells(sce.stim, features = c("FSCA", "Ki67", "IL2", "IL10", "TNF", "IFNg", "GMCSF", "LD", "cleaved_caspase_3", "Apotracker", "PD1"), exprs_values = "exprs")[[1]]
+
+plotTab <- rbind(plotTab.1, plotTab.2)
+
+brc.live <- plotTab %>%
+    left_join(types, by = "uniqueBarcode") %>% 
+   mutate(cellDeath = ifelse(LD > ld |  cleaved_caspase_3 > cl3 | Apotracker > apo, "dead", "live"),
+         cellDeath = ifelse(FSCA < 750000, "dead", cellDeath),
+         cellDeath = ifelse(FSCA < 1500000 & cleaved_caspase_3 > cl3small, "apoptotic", cellDeath),
+         cellDeath = ifelse(cellDeath == "dead" & cleaved_caspase_3 > cl3, "apoptotic", cellDeath)) %>%
+  filter(cellDeath %in% c("live")) %>%
+  pull(uniqueBarcode) %>% unique()
+
+
+lapply(c("IL2", "TNF", "IFNg", "GMCSF"), function(x) {
+  message(x)
+  p <- plotTab %>%
+    left_join(types, by = "uniqueBarcode") %>%
+    filter(uniqueBarcode %in% brc.live, !celltype == "debris") %>%
+    filter(Treatment %in% c("DMSO", "DMSO_stim", "Birinapant_low_stim")) %>%
+    mutate(celltype_broad = ifelse(celltype_broad %in% c("T-PLL", "T-LGL"), "Lymphoma Cells", celltype_broad)) %>%
+    #filter(celltype_broad == "Lymphoma Cells") %>%
+    mutate(Treatment = ifelse(Treatment == "DMSO_stim", "DMSO (stim)", Treatment),
+           Treatment = ifelse(Treatment == "Birinapant_low_stim", "Birinapant (stim)", Treatment),
+           Treatment = factor(Treatment, levels = c("Birinapant (stim)", "DMSO (stim)", "DMSO"))) %>%
+    pivot_longer(cols = x, names_to = "adt", values_to = "expr") %>%
+    ggplot(aes(x = expr, y = Treatment, fill = Treatment)) +
+    #geom_density(alpha = 0.8, colour = "black") +
+    geom_density_ridges2(alpha = 0.8, colour = "black") +
+    xlab(x) + ylab("") +
+    lgd +
+    theme(legend.position = "none", 
+          panel.border = element_rect(linewidth = 1)) +
+    facet_wrap(. ~ celltype_broad, nrow = 1) +
+    scale_fill_manual(values = c("Birinapant (stim)" = "#AD1457", "DMSO (stim)" = "#FFA000", 
+                                   "DMSO" = "grey70"))
+  
+    ggsave(plot = p, filename = paste0(opt$plot, x, "_viol.png"),
+         height = 10, width = 30, units = "cm")
+    
+  p
+})
+
+lapply(c("Ki67"), function(x) {
+  message(x)
+  p <- plotTab %>%
+    left_join(types, by = "uniqueBarcode") %>%
+    filter(uniqueBarcode %in% brc.live, !celltype == "debris") %>%
+    filter(Treatment %in% c("DMSO", "DMSO_stim", "Birinapant_low_stim")) %>%
+    mutate(celltype_broad = ifelse(celltype_broad %in% c("T-PLL", "T-LGL"), "Lymphoma Cells", celltype_broad)) %>%
+    #filter(celltype_broad == "Lymphoma Cells") %>%
+    mutate(Treatment = ifelse(Treatment == "DMSO_stim", "DMSO (stim)", Treatment),
+           Treatment = ifelse(Treatment == "Birinapant_low_stim", "Birinapant (stim)", Treatment),
+           Treatment = factor(Treatment, levels = c("Birinapant (stim)", "DMSO (stim)", "DMSO"))) %>%
+    pivot_longer(cols = x, names_to = "adt", values_to = "expr") %>%
+    ggplot(aes(x = expr, y = Treatment, fill = Treatment)) +
+    #geom_density(alpha = 0.8, colour = "black") +
+    geom_density_ridges2(alpha = 0.8, colour = "black") +
+    geom_vline(xintercept = 1.5, linetype = "dashed") +
+    xlab(x) + ylab("") +
+    lgd +
+    theme(legend.position = "none", 
+          panel.border = element_rect(linewidth = 1)) +
+    facet_wrap(. ~ celltype_broad, nrow = 1) +
+    scale_fill_manual(values = c("Birinapant (stim)" = "#AD1457", "DMSO (stim)" = "#FFA000", 
+                                 "DMSO" = "grey70"))
+  
+    ggsave(plot = p, filename = paste0(opt$plot, x, "_viol.png"),
+         height = 10, width = 30, units = "cm")
+    
+  p
+})
+
+```
+

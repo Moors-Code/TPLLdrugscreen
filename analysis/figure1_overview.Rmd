@@ -1,11 +1,9 @@
 ---
 title: "Figure 1"
-author: "M. Pohly"
-date: "27/04/2023"
+author: "M. Pohly, J. Lu"
+date: "`r Sys.Date()`"
 output: html_document
 ---
-Last updated on `r Sys.Date()`
-This figure will provide an overview over the data sets, patients and compounds. 
 
 #### Load libraries
 ```{r warning=FALSE, message=FALSE}
@@ -47,104 +45,6 @@ lgd <-  theme_bw() +
 drugList <- readRDS(opt$drugscreen)
 drugAnno <- read_excel(opt$druganno) %>%
   dplyr::select(-Supplier) %>% unique()
-```
-
-#### Fig 1B
-#### Bar plots of drug composition
-```{r}
-drugAnno.red <- drugAnno %>%
-  mutate(Pathway = ifelse(Pathway %in% c("HDAC", "HDM", "BET", "HMT", "HAT", "HMT, MYC", "NFKB, HDAC, DNA Damage"), "Epigenome", Pathway)) %>%
-  mutate(Pathway = ifelse(Pathway %in% c("Apoptosis", "Necroptosis", "Autophagy"), "Prg. Cell Death", Pathway)) %>%
-  mutate(Pathway = ifelse(Pathway %in% c("DNA Damage", "DNA Damage, NFKB", "Chemo"), "DNA Damage", Pathway)) %>%
-  mutate(Pathway = ifelse(Pathway %in% c("EGFR", "Prg. Cell Death", "BRAF", "Chemo", "Epigenome", "JAK-STAT", "DNA Damage", 
-                                         "Cell Cycle", "BCR/TCR", "MEK", "PI3K-AKT-mTOR", "MAPK", "Metabolism", "ROS"), Pathway, "Other")) %>%
-  group_by(Screen) %>% mutate(TotalDrugs = length(Drug)) %>% ungroup()
-
-
-## ScreenA
-pathOrder <- c("PI3K-AKT-mTOR", "Epigenome", "Cell Cycle", "Metabolism", "DNA Damage",
-               "BCR/TCR", "MAPK", "ROS", "JAK-STAT", "Prg. Cell Death", "BRAF", 
-               "EGFR", "MEK", "Other")
-
-colTab <- c("#1E88E5", "#009688", "#FF8F00", "#E53935", "#9575CD", "#4FC3F7", #"#4FC3F7",
-                     "#81C784", "#F06292", "#EF9A9A", "#C5E1A5", "#B3E5FC", "#FDD835" , "#FFF9C4", "#1A237E")
-
-geomText <- drugAnno.red %>% 
-  filter(Screen != "Screen E") %>% 
-  select(Screen, TotalDrugs) %>% unique()
-
-p <- drugAnno.red %>% filter(Screen != "Screen E") %>%
-  group_by(Screen) %>%
-  dplyr::count(Pathway, TotalDrugs) %>%
-  mutate(percentage = n / TotalDrugs) %>%
-#  arrange(desc(n)) %>%
-  mutate(Pathway = factor(Pathway, levels = pathOrder), 
-         Screen = factor(Screen, levels = c("Screen A", "Screen B", "Screen C", "Screen D"))) %>%
-  #mutate(PathwayPer = paste(Pathway, " (", n, ")", sep = "")) %>% 
-  arrange(Pathway) %>%
-  #mutate(Pathway = factor(PathwayPer, levels = PathwayPer)) %>%
-  ggplot(aes(x = Screen, y = percentage)) +
-  geom_bar(stat = "identity", colour = "black", aes(fill = Pathway)) +
-  geom_text(aes(label = TotalDrugs, x = Screen), y = 1.025, data = geomText, size = 5) +
-  xlab("") + ylab("Fraction of the Drug Library") + ggtitle("Drug Libraries") +
-  #coord_polar("y", start=0, direction = -1) +
-  theme_classic() +
-  theme(plot.title = element_text(hjust = 0.5), 
-        text = element_text(size = 17.5),
-        panel.background = element_rect(fill = "transparent",colour = NA),
-        plot.background = element_rect(fill = "transparent",colour = NA), 
-        legend.background = element_rect(fill='transparent',colour = NA), 
-        strip.background = element_blank(), 
-        panel.grid.major = element_blank(), 
-        panel.grid.minor = element_blank(), 
-        axis.line = element_line(linewidth = 1)) +
-  scale_fill_manual(values = colTab)
-p
-
-ggsave(plot = p, filename = paste0(opt$plot, "druglibrary_bar.png"), height = 15, 
-       width = 20, units = "cm")
-
-```
-
-#### Bar chart of screen composition
-```{r}
-plotTab <- lapply(c("ScreenA", "ScreenB", "ScreenC", "ScreenD"), function(x) {
-  screenData <- drugList[[x]]
-  
-  screenData %>% filter(diagnosis %in% c("CLL", "MCL", "T-PLL")) %>%
-    select(patientID, diagnosis) %>%
-    unique() %>%
-    dplyr::count(diagnosis) %>%
-    mutate(totalPatients = sum(n), 
-           rel = n / totalPatients,
-           Screen = x)
-}) %>% bind_rows() %>%
-  mutate(Screen = str_replace(string = Screen, pattern = "Screen", replacement = "Screen "))
-
-
-p <- plotTab %>%
-  mutate(Screen = factor(Screen, levels = c("Screen A", "Screen B", "Screen C", "Screen D")), 
-         Diagnosis = diagnosis) %>%
-  ggplot(aes(x = Screen, y = rel)) +
-  geom_bar(stat = "identity", colour = "black", aes(fill = Diagnosis)) +
-  geom_text(aes(label = totalPatients, x = Screen), y = 1.025, size = 5, data = unique(select(plotTab, Screen, totalPatients))) +
-  xlab("") + ylab("Fraction of the Total Patients") + ggtitle("Patients per Screen") +
-  theme_classic() +
-  theme(plot.title = element_text(hjust = 0.5), 
-        text = element_text(size = 17.5),
-        panel.background = element_rect(fill = "transparent",colour = NA),
-        plot.background = element_rect(fill = "transparent",colour = NA), 
-        legend.background = element_rect(fill='transparent',colour = NA), 
-        strip.background = element_blank(), 
-        panel.grid.major = element_blank(), 
-        panel.grid.minor = element_blank(), 
-        axis.line = element_line(linewidth = 1)) +
-  scale_fill_manual(values = c("MCL" = "#F44336", "T-PLL" = "#64B5F6", "CLL" = "#FFD45F"))
-p
-
-ggsave(plot = p, filename = paste0(opt$plot, "patients_bar.png"), height = 15, 
-       width = 19, units = "cm")
-
 ```
 
 ##### Piechart - Screen A
@@ -195,7 +95,7 @@ ggsave(plot = p, filename = paste0(opt$plot, "ScreenA_piechar.png"), height = 5,
        width = 5)
 ```
 
-##### Piechart - ScreenB
+##### Piechart - Screen B
 ```{r fig.height= 5, fig.width=5}
 ## ScreenB
 p <- drugAnno.red %>% filter(Screen == "Screen B") %>%
@@ -227,7 +127,7 @@ ggsave(plot = p, filename = paste0(opt$plot, "ScreenB_piechar.png"), height = 5,
        width = 5)
 ```
 
-##### Piechart - ScreenC
+##### Piechart - Screen C
 ```{r fig.height= 5, fig.width=5}
 ## ScreenC
 p <- drugAnno.red %>% filter(Screen == "Screen C") %>%
@@ -259,7 +159,7 @@ ggsave(plot = p, filename = paste0(opt$plot, "ScreenC_piechar.png"), height = 5,
          width = 5)
 ```
 
-##### Piechart - ScreenD
+##### Piechart - Screen D
 ```{r fig.height= 5, fig.width=5}
 ## ScreenD
 colTab <- c("#1E88E5", "#009688", "#FF8F00", "#9575CD", "#4FC3F7", #"#4FC3F7",
@@ -295,115 +195,43 @@ ggsave(plot = p, filename = paste0(opt$plot, "ScreenD_piechar.png"), height = 5,
 
 ```
 
-##### Vendiagram - Patients
-```{r fig.height= 8, fig.width=8}
-## Get screen data
-ScreenA <- drugList[["ScreenA"]]
-ScreenB <- drugList[["ScreenB"]]
-ScreenC <- drugList[["ScreenC"]]
-ScreenD <- drugList[["ScreenD"]]
-
-## Adjust info and get into a single data.frame
-ScreenA.df <- ScreenA %>% filter(diagnosis == "T-PLL") %>%
-  select(patientID) %>% unique() %>%
-  mutate(screen = "Screen A")
-
-ScreenB.df <- ScreenB %>% filter(diagnosis == "T-PLL") %>%
-  select(patientID) %>% unique() %>%
-  mutate(screen = "Screen B")
-
-ScreenC.df <- ScreenC %>% filter(diagnosis == "T-PLL") %>%
-  select(patientID) %>% unique() %>%
-  mutate(screen = "Screen C")
-
-ScreenD.df <- ScreenD %>% filter(diagnosis == "T-PLL") %>%
-  select(patientID) %>% unique() %>%
-  mutate(screen = "Screen D")
-
-patDat <- rbind(ScreenA.df, ScreenB.df, ScreenC.df, ScreenD.df) %>%
-  pivot_wider(names_from = "screen", values_from = "screen")
-
-## Prepare list for venndiaggram
-x <- list(
-  `Screen B` = patDat %>% filter(`Screen B` == "Screen B") %>% select(patientID) %>%
-    unlist() %>% as.vector(), 
-  `Screen A` = patDat %>% filter(`Screen A` == "Screen A") %>% select(patientID) %>%
-    unlist() %>% as.vector(), 
-  `Screen C` = patDat %>% filter(`Screen C` == "Screen C") %>% select(patientID) %>%
-    unlist() %>% as.vector(),
-  `Screen D` = patDat %>% filter(`Screen D` == "Screen D") %>% select(patientID) %>%
-    unlist() %>% as.vector())
-
-## Make venndiagram with labels
-p <- ggvenn(x, fill_color = c( "#EF9A9A", "#D1C4E9", "#B3E5FC", "#A5D6A7"),
-            stroke_size = 0.75, set_name_size = 11, text_size = 11, show_percentage = FALSE) + 
-  theme(plot.title = element_text(hjust=0.5), 
-        panel.grid.major = element_blank(), 
-        panel.grid.minor = element_blank(),
+##### Piechart - Validation screen
+```{r fig.height= 5.5, fig.width=5.5}
+## Validation
+colTab <- c("#1E88E5", "#009688", "#FF8F00", "#9575CD", "#4FC3F7", #"#4FC3F7",
+                     "#81C784", "#EF9A9A", "#C5E1A5", "#FDD835" , "#FFF9C4", "#1A237E")
+                     
+p <- drugAnno.red %>% filter(Screen == "Screen E") %>%
+  dplyr::count(Pathway, TotalDrugs) %>%
+  mutate(percentage = n / TotalDrugs) %>%
+  #  arrange(desc(n)) %>%
+  mutate(Pathway = factor(Pathway, levels = pathOrder)) %>%
+  mutate(PathwayPer = paste(Pathway, " (", n, ")", sep = "")) %>% 
+  arrange(Pathway) %>%
+  mutate(Pathway = factor(PathwayPer, levels = PathwayPer)) %>%
+  ggplot(aes(x = "", y = percentage, fill = Pathway)) +
+  geom_bar(stat = "identity", colour = "black") +
+  #ggtitle("Drug Library") +
+  ggtitle("") +
+  coord_polar("y", start=0, direction = -1) +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5), 
+        text = element_text(size = 12.5, face = "bold"),
         panel.background = element_rect(fill = "transparent",colour = NA),
-        plot.background = element_rect(fill = "transparent",colour = NA))
+        plot.background = element_rect(fill = "transparent",colour = NA), 
+        legend.background = element_rect(fill='transparent',colour = NA), 
+        strip.background = element_blank(), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) +
+  scale_fill_manual(values = colTab)
 p
 
-
-## Make venndiagram with labels
-p <- ggvenn(x, fill_color = c( "#EF9A9A", "#D1C4E9", "#B3E5FC", "#A5D6A7"),
-            stroke_size = 0.75, set_name_size = 0, text_size = 11, show_percentage = FALSE) + 
-theme(plot.title = element_text(hjust=0.5), 
-      panel.grid.major = element_blank(), 
-      panel.grid.minor = element_blank(),
-      panel.background = element_rect(fill = "transparent",colour = NA),
-      plot.background = element_rect(fill = "transparent",colour = NA))
-  
-ggsave(plot = p, filename = paste0(opt$plot, "patientoverlap.png"), 
-       height = 8, width = 8)
-```
-
-##### Vendiagram - Compounds
-```{r fig.height= 8, fig.width=8}
-## Get into the correct format
-drugAnno.venn <- drugAnno %>% select(Drug, Screen) %>%
-  pivot_wider(names_from = "Screen", values_from = "Screen") %>%
-  unique()
-
-# Drug overlap
-x <- list(
-  `Screen B` = drugAnno.venn %>% filter(`Screen B` == "Screen B") %>% select(Drug) %>%
-    unlist() %>% as.vector(), 
-  `Screen A` = drugAnno.venn %>% filter(`Screen A` == "Screen A") %>% select(Drug) %>%
-    unlist() %>% as.vector(), 
-  `Screen C` = drugAnno.venn %>% filter(`Screen C` == "Screen C") %>% select(Drug) %>%
-    unlist() %>% as.vector(),
-  `Screen D` = drugAnno.venn %>% filter(`Screen D` == "Screen D") %>% select(Drug) %>%
-    unlist() %>% as.vector()
-)
-
-## Version with text:
-p <- ggvenn(x, fill_color = c( "#EF9A9A", "#D1C4E9", "#B3E5FC", "#A5D6A7"),
-            stroke_size = 0.75, set_name_size = 11, text_size = 11, show_percentage = FALSE) + 
-  theme(plot.title = element_text(hjust=0.5), 
-        panel.grid.major = element_blank(), 
-        panel.grid.minor = element_blank(),
-        panel.background = element_rect(fill = "transparent",colour = NA),
-        plot.background = element_rect(fill = "transparent",colour = NA))
-p
-
-
-## Version without text
-p <- ggvenn(x, fill_color = c( "#EF9A9A", "#D1C4E9", "#B3E5FC", "#A5D6A7"),
-            stroke_size = 0.75, set_name_size = 0, text_size = 11, show_percentage = FALSE) + 
-theme(plot.title = element_text(hjust=0.5), 
-      panel.grid.major = element_blank(), 
-      panel.grid.minor = element_blank(), 
-      panel.background = element_rect(fill = "transparent",colour = NA),
-      plot.background = element_rect(fill = "transparent",colour = NA))
-  
-ggsave(plot = p, filename = paste0(opt$plot, "drugoverlap.png"), 
-       height = 8, width = 8)
-
+ggsave(plot = p, filename = paste0(opt$plot, "validation_piechar.png"), height = 5, 
+       width = 5)
 ```
 
 #### Fig 1C
-##### Ranked toxicity - ScreenA
+##### Ranked toxicity - Screen A
 ```{r message=FALSE, fig.height= 6, fig.width=15}
 ScreenA <- drugList[["ScreenA"]] # get ScreenA data
 
@@ -492,142 +320,6 @@ ggsave(plot = p[[1]], filename = paste0(opt$plot, "/ScreenA_overview_low.png"),
        height = 6.5, width = 20)
 ```
 
-##### Drug-Drug correlation - ScreenA
-```{r fig.height= 12.5, fig.width=12.5}
-
-# viabMat <- filter(ScreenA, diagnosis == "T-PLL") %>%
-#   group_by(patientID, name) %>% summarise(viab = mean(viab, na.rm = TRUE)) %>%
-#   spread(key = patientID, value = "viab") %>% data.frame() %>%
-#   column_to_rownames("name") %>% as.matrix()
-# 
-# viabMat <- viabMat[complete.cases(viabMat),]
-# 
-# ## Define colour-scheme
-# colorList <- c(colorRampPalette(c("lightseagreen", "white"))(20),
-#                colorRampPalette(c("white"))(10),
-#                colorRampPalette(c("white","deeppink"))(20))
-# 
-# # corMat <- cor(t(viabMat), method = "spearman")
-# corMat <- cor(t(viabMat), method = "pearson")
-# 
-# p4 <- pheatmap(corMat, color = colorList, 
-#                show_rownames = FALSE, show_colnames = FALSE, legend = FALSE,
-#                breaks = seq(-1,1,length.out = 50), clustering_method = "ward.D2", name = "R^2", 
-#                )
-# p4
-
-# if(opt$saveplots == TRUE) {
-#   png(file="plots/fig1/drug-drug-matrix.png", 
-#     height = 25, width = 25, res = 600, units = "cm", bg = "transparent")
-#   draw(p4, background = "transparent")
-#   dev.off()
-# }
-
-```
-
-##### TPLL drug response - ScreenA
-```{r fig.height= 5.5, fig.width=5.5}
-
-# tTest <- function(value, type) {
-#   res <- t.test(value ~ factor(type), equal.var = TRUE, na.action = na.exclude)
-#   tibble(p = res$p.value,
-#          diff = res$estimate[[2]] - res$estimate[[1]])
-# }
-# 
-# compDiag <- "CLL"
-# diagSelected <- c(compDiag, "T-PLL")
-# 
-# screenDat <- ScreenA
-# 
-# ## Compute average toxicity and perform pairwise t-test
-# pTab <- lapply(diagSelected[diagSelected != c(compDiag)], function(diag) {
-#   print(diag)
-#   testTab <- filter(screenDat, diagnosis %in% c(compDiag, diag),
-#                     !name %in% c("DMSO", "empty")) %>%
-#     #filter(name %in% c("Venetoclax")) %>%
-#     mutate(diagnosis = factor(diagnosis, levels = c(compDiag, diag)), 
-#            viab = viab.auc) %>%
-#     select(patientID, diagnosis, name, viab) %>% filter(!is.na(viab)) %>% unique()
-#   res <- group_by(testTab, name) %>% do(tTest(.$viab, .$diagnosis))
-#   res$diagnosis <- diag
-#   res
-# }) %>% bind_rows() %>% ungroup() %>% mutate(p.adj = p.adjust(p, method = "BH"))
-# 
-# plotTab <- pTab %>% mutate(p = ifelse(p < 1e-12, 1e-12, p)) %>%
-#   mutate(pSign = -log10(p)*sign(diff)) %>%
-#   ungroup()
-# 
-# plotTab$diffCol <- "ns"
-# plotTab[plotTab[, "p"] < 0.05 & plotTab[, "diff"] < -0.05, "diffCol"] <- "higher_sen"
-# plotTab[plotTab[, "p"] < 0.05 & plotTab[, "diff"] > 0.05, "diffCol"] <- "lower_sen"
-# 
-# p1 <- plotTab %>%
-#   ggplot(aes(x = diff, y = -log10(p))) +
-#   geom_point(shape = 21, size = 2.5, aes(fill = diffCol)) +
-#   geom_hline(yintercept = 1.3, linetype = "dashed") +
-#   geom_vline(xintercept = 0.05, linetype = "dashed") +
-#   geom_vline(xintercept = -0.05, linetype = "dashed") +
-#   scale_x_reverse(limits = c(0.5, -0.5)) +
-#   xlab("Viability Difference") + ylab("-log10(p.value)") +
-#   ggtitle("") +
-#   theme_classic() + 
-#   theme(plot.title = element_text(hjust = 0.5, size = 20), 
-#         axis.title = element_text(size = 17.5),
-#         axis.text = element_text(size = 15),
-#         axis.line = element_line(linewidth = 0.75),
-#         legend.position = "none",
-#         legend.key = element_blank(),
-#         panel.grid.major = element_blank(), 
-#         panel.grid.minor = element_blank(),
-#         panel.background = element_rect(fill = "transparent",colour = NA),
-#         plot.background = element_rect(fill = "transparent",colour = NA),
-#         legend.background = element_rect(fill='transparent')) +
-#   scale_fill_manual(values = c("higher_sen" = "#1976D2", "lower_sen" = "#F44336", "ns" = "grey"))
-# p1
-# 
-# if(opt$saveplots == TRUE) {
-#   ggsave(plot = p1, file = "plots/fig1/vol_ScreenA.png", height = 5.5, width = 5.5)
-# }
-
-
-```
-
-##### Piechart - Validation screen
-```{r fig.height= 5.5, fig.width=5.5}
-## Validation
-colTab <- c("#1E88E5", "#009688", "#FF8F00", "#9575CD", "#4FC3F7", #"#4FC3F7",
-                     "#81C784", "#EF9A9A", "#C5E1A5", "#FDD835" , "#FFF9C4", "#1A237E")
-                     
-p <- drugAnno.red %>% filter(Screen == "Screen E") %>%
-  dplyr::count(Pathway, TotalDrugs) %>%
-  mutate(percentage = n / TotalDrugs) %>%
-  #  arrange(desc(n)) %>%
-  mutate(Pathway = factor(Pathway, levels = pathOrder)) %>%
-  mutate(PathwayPer = paste(Pathway, " (", n, ")", sep = "")) %>% 
-  arrange(Pathway) %>%
-  mutate(Pathway = factor(PathwayPer, levels = PathwayPer)) %>%
-  ggplot(aes(x = "", y = percentage, fill = Pathway)) +
-  geom_bar(stat = "identity", colour = "black") +
-  #ggtitle("Drug Library") +
-  ggtitle("") +
-  coord_polar("y", start=0, direction = -1) +
-  theme_void() +
-  theme(plot.title = element_text(hjust = 0.5), 
-        text = element_text(size = 12.5, face = "bold"),
-        panel.background = element_rect(fill = "transparent",colour = NA),
-        plot.background = element_rect(fill = "transparent",colour = NA), 
-        legend.background = element_rect(fill='transparent',colour = NA), 
-        strip.background = element_blank(), 
-        panel.grid.major = element_blank(), 
-        panel.grid.minor = element_blank()) +
-  scale_fill_manual(values = colTab)
-p
-
-ggsave(plot = p, filename = paste0(opt$plot, "validation_piechar.png"), height = 5, 
-       width = 5)
-```
-
-
 #### BH3 mimetics
 ```{r fig.height= 6.25, fig.width=7.25}
 ScreenB <- drugList[["ScreenB"]] # get ScreenB data
@@ -694,10 +386,10 @@ pVen <- viabTab %>%
   geom_beeswarm(size = 3.5, shape = 21, cex = 3, alpha = 0.75) +
   geom_hline(yintercept = 1, linetype = "dashed") +
   xlab("") + ylab("Mean Viability") +
-  ggtitle("Screen B - Diff. Activity of BH3-Mimetics") +
+  ggtitle("Screen B - Activity of BH3-Mimetics") +
   theme_classic() +
   theme(text = element_text(size = 17.5),
-    plot.title = element_text(hjust=0.5), 
+    plot.title = element_text(hjust=0.5, size = 25), 
         axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 20),
     axis.text.y = element_text(size = 20),
         panel.grid.major = element_blank(), 
@@ -717,7 +409,7 @@ ggsave(plot = pVen, filename = paste0(opt$plot, "diffVen.png"),
 ```
 
 ### Dose-response fludarabine
-```{r fig.height= 5, fig.width=7}
+```{r fig.height= 5, fig.width=6.5}
 ScreenC <- drugList[["ScreenC"]] ## get ScreenC data
 
 drugSub <- c("Fludarabine")
@@ -754,10 +446,8 @@ ggsave(plot = p1, filename = paste0(opt$plot, drugSub, ".png"),
        height = 5, width = 6)
 ```
 
-
-
 #### Dose-response nutlin-3a
-```{r fig.height= 5, fig.width=7}
+```{r fig.height= 5, fig.width=6.5}
 ScreenC <- drugList[["ScreenC"]] ## get ScreenC data
 
 drugSub <- c("Nutlin-3a")
@@ -796,7 +486,7 @@ ggsave(plot = p1, filename = paste0(opt$plot, drugSub, ".png"),
 ```
 
 #### Dose-response birinapant
-```{r fig.height= 5, fig.width=8}
+```{r fig.height= 5, fig.width=6.5}
 drugSub <- "Birinapant"
 
 concInter <- ScreenB %>%
@@ -839,7 +529,7 @@ ggsave(plot = p1, filename = paste0(opt$plot, drugSub, ".png"),
 ```
 
 #### Dose-response bafilomycin A1
-```{r fig.height= 5, fig.width=8}
+```{r fig.height= 5, fig.width=6.5}
 drugSub <- "Bafilomycin A1"
 
 concInter <- ScreenB %>%
@@ -882,7 +572,7 @@ ggsave(plot = p1, filename = paste0(opt$plot, drugSub, ".png"),
 ```
 
 #### Dose-response selinexor
-```{r fig.height= 5, fig.width=7}
+```{r fig.height= 5, fig.width=6.5}
 ScreenD <- drugList[["ScreenD"]] ## get ScreenD data
 
 drugSub <- c("Selinexor")
@@ -920,7 +610,7 @@ ggsave(plot = p1, filename = paste0(opt$plot, drugSub, ".png"),
 ```
 
 #### Dose-response venetoclax
-```{r fig.height= 5, fig.width=7}
+```{r fig.height= 5, fig.width=6.5}
 ScreenD <- drugList[["ScreenD"]] ## get ScreenD data
 
 drugSub <- c("Venetoclax")
@@ -990,7 +680,6 @@ viabTab %>% dplyr::filter(name %in% drugSub, diagnosis == "T-PLL") %>%
   arrange(Pathway, value)
 ```
 
-
 #### Report average effect of key compounds - ScreenD
 ```{r}
 ## Report the average toxicity 
@@ -1005,62 +694,6 @@ viabTab <- ScreenD %>% dplyr::filter(!name %in% c("PBS", "DMSO")) %>%
   dplyr::select(diagnosis, name, Target, Pathway, value) %>% unique()
 
 viabTab %>% dplyr::filter(name %in% drugSub, diagnosis == "T-PLL")
-```
-
-#### Overview plot drug classes
-```{r}
-pathSub <- c("PI3K-AKT-mTOR", "Epigenome", "Cell Cycle", "Metabolism", "DNA Damage",
-             "BCR/TCR", "MAPK", "ROS", "JAK-STAT", "Prg. Cell Death", "BRAF",
-             "EGFR", "MEK", "Nuclear Traffic")
-
-drugSub <- c("Venetoclax", "Navitoclax", "Birinapant", "Nutlin-3a", "Selinexor", "Verdinexor", "Navitoclax", "Fludarabine", 
-               "Dacinostat", "Vorinostat", "Panobinostat", "Cytarabine", "Mitoxantrone", 
-               "Dinaciclib", "SNS-032", "Ibrutinib", "Ruxolitinib", "Duvelisib", "UNC0638", 
-               "JQ1", "OTX015", "JIB04", "Flavopiridol", "Bafilomycin A1", "Thapsigargin")
-
-pList <- lapply(c("ScreenA", "ScreenB", "ScreenC", "ScreenD"), function(x) {
-  Screen <- drugList[[x]] # get ScreenA data
-
-  Screen$screen <- gsub(x = x, pattern = "Screen", replacement = "Screen ")
-  ## compute the mean druf effect per patient x drug
-  viabTab <- Screen %>% dplyr::filter(!is.na(name), !is.na(diagnosis)) %>%
-    filter(diagnosis == "T-PLL") %>%
-    dplyr::filter(!name %in% c("PBS", "DMSO")) %>%
-    group_by(name, diagnosis) %>%
-    mutate(value = mean(viab.auc, na.rm = TRUE)) %>%
-    ungroup() %>%
-    left_join(dplyr::select(drugAnno.red, Drug, Target, Pathway), 
-              by = c("name" = "Drug")) %>%
-    select(name, value, Pathway, screen) %>% unique() %>%
-    mutate(Pathway = ifelse(name %in% c("Selinexor", "Verdinexor"), "Nuclear Traffic", Pathway)) %>%
-    filter(Pathway %in% pathSub)
-  
-
-  viabTab %>%
-    ggplot(aes(x = Pathway, y = value)) +
-    #geom_boxplot() +
-    geom_beeswarm(shape = 21, size = 2, stroke = 0.25, aes(fill = Pathway), alpha = 0.6) +
-    geom_hline(yintercept = 1, linetype = "dashed") +
-    ylim(0, 1.2) + xlab("") + ylab("Viability") +
-    lgd +
-    facet_wrap(. ~ screen, scales = "free_x") +
-    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
-    geom_label_repel(data = viabTab[viabTab$name %in% drugSub, ], 
-                     aes(label = name), 
-                     max.overlaps = getOption("ggrepel.max.overlaps", default = 90),
-                     segment.linetype = 2, force = 10, show.legend = FALSE, alpha = 0.8,
-                     nudge_x = 0.15, nudge_y = -0.15) +
-    theme(legend.position = "none") +
-    scale_fill_manual(values = c("PI3K-AKT-mTOR" = "#1E88E5", "Epigenome" = "#009688", "Cell Cycle" = "#FF8F00", 
-                                 "Metabolism" = "#E53935", "DNA Damage" = "#9575CD", "Nuclear Traffic" = "#1A237E",
-                                 "BCR/TCR" = "#4FC3F7", "MAPK" = "#81C784", "ROS" = "#F06292", "JAK-STAT" = "#EF9A9A",
-                                 "Prg. Cell Death" = "#C5E1A5", "BRAF" = "#B3E5FC", "EGFR" = "#FDD835", "MEK" = "#FFF9C4"))
-  #viabTab %>% filter(name == "Selinexor")
-})
-pList
-grid.arrange(grobs = pList)
-
-
 ```
 
 #### Output session info
