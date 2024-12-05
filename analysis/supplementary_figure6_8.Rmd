@@ -821,6 +821,7 @@ combiTab <- left_join(comObs, drugObs, by = c("sampleID", "drug1", "concentratio
   mutate(CI =  comViab/expViab) %>%
   arrange(name) %>%
   filter(conc2 %in% combiConc)
+
 ```
 
 #### Scatter plot GDC-0152 + QVD-Oph vs birinapant + necrostatin-1
