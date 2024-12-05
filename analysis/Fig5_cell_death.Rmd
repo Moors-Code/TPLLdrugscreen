@@ -265,6 +265,8 @@ lapply(c("Necrostatin-1", "NSA", "GSK-872", "QVD-Oph"), function(x) {
   message(x)
   concInter <- drug.df %>% filter(name == "Birinapant") %>% pull(concentration) %>% unique()
   
+  if(x == "QVD-Oph") {tlt <- "Q-VD-OPh"} else {tlt <- x}
+  
   p <- combiTab %>%
     filter(drug2 %in% x) %>%
     dplyr::rename(Expected = expViab, Observed = obsViab, Single = viab1) %>%
@@ -283,7 +285,7 @@ lapply(c("Necrostatin-1", "NSA", "GSK-872", "QVD-Oph"), function(x) {
     geom_point(size = 3.5, shape = 21, aes(fill = viab)) +
     scale_x_log10(labels = concInter, breaks = concInter) +
     scale_y_continuous(limits = c(0, 1.2), breaks = c(0, 0.5, 1.0, 1.5)) +
-    xlab("Birinapant (µM)") + ylab("Viability") + ggtitle(x) +
+    xlab("Birinapant (µM)") + ylab("Viability") + ggtitle(tlt) +
     theme_classic() +
     theme(text = element_text(size = 22.5),
           plot.title = element_text(hjust = 0.5, size = 22.5),
@@ -369,7 +371,10 @@ plotTab
 concInter <- combiTab %>% filter(drug1 == "Birinapant") %>%
   pull(concentration) %>% unique()
 
-drugSelec <- c("Necrostatin-1", "NSA", "GSK-872", "QVD-Oph")
+drugSelec <- c("Necrostatin-1", "NSA", "GSK-872", "Q-VD-OPh")
+
+combiTab <- combiTab %>% 
+  mutate(drug2 = ifelse(drug2 == "QVD-Oph", "Q-VD-OPh", drug2))
 
 combiConc <- combiTab %>% 
   filter(drug2 == drugSelec) %>%
@@ -520,7 +525,8 @@ plotTab <- combiTestRes %>%
 
 p4 <- plotTab %>%
   mutate(concentration = round(concentration, 5), 
-         drug2 = factor(drug2, levels = c("QVD-Oph", "Necrostatin-1")), 
+         drug2 = ifelse(drug2 == "QVD-Oph", "Q-VD-OPh", drug2), 
+         drug2 = factor(drug2, levels = c("Q-VD-OPh", "Necrostatin-1")), 
          diagnosis = factor(diagnosis, levels = diagList)) %>%
   ggplot(aes(x = diagnosis, y = factor(concentration), fill = pSign)) +
   geom_tile(colour = "grey") +
