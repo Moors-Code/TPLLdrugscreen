@@ -752,7 +752,7 @@ p4 <- plotTab %>%
   ylab("Concentration (µM)") +
   facet_wrap(. ~ drug2, scale = "free") +
   scale_fill_gradient2(high = "#F44336", mid = "white", low = "#1976D2", midpoint = 0,
-                       name = "-Log10(p.adj) \n with Direction") +
+                       name = "-Log10(p) \n with Direction") +
   theme_classic() +
   theme(axis.text.x = element_text(angle = 90, hjust=1, vjust = 0.5, size = 11.5),
         axis.text.y = element_text(size = 11.5), 

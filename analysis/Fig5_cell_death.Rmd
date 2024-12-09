@@ -526,14 +526,15 @@ plotTab <- combiTestRes %>%
 
 p4 <- plotTab %>%
   mutate(concentration = round(concentration, 5), 
-         drug2 = ifelse(drug2 == "QVD-Oph", "Q-VD-OPh", drug2), 
-         drug2 = factor(drug2, levels = c("Q-VD-OPh", "Necrostatin-1")), 
+         drug2 = ifelse(drug2 == "QVD-Oph", "Q-VD-OPh", drug2),
+         drug2 = paste0("Birinapant + ", drug2),
+         drug2 = factor(drug2, levels = c("Birinapant + Q-VD-OPh", "Birinapant + Necrostatin-1")), 
          diagnosis = factor(diagnosis, levels = diagList)) %>%
   ggplot(aes(x = diagnosis, y = factor(concentration), fill = pSign)) +
   geom_tile(colour = "grey") +
   xlab("") +
   ylab("Concentration (µM)") +
-  facet_wrap(drug1 ~ drug2, scale = "free") +
+  facet_wrap(. ~ drug2, scale = "free") +
   scale_fill_gradient2(high = "#F44336", mid = "white", low = "#1976D2", midpoint = 0,
                        name = "-Log10(p) \n with Direction") +
   theme_classic() +
@@ -555,7 +556,7 @@ p4 <- plotTab %>%
 p4
 
 ggsave(plot = p4, filename = paste0(opt$plot, "CI_qvd_necro_heatmap.png"), 
-       height = 4, width = 8)
+       height = 4, width = 8.5)
 
 
 ```
@@ -701,12 +702,13 @@ plotTabNSA <- combiTestResNSA %>%
 
 p3 <- plotTabNSA %>%
   mutate(concentration = round(concentration, 6), 
+         drug2 = paste0("Birinapant + ", drug2),
          diagnosis = factor(diagnosis, levels = diagList)) %>%
   ggplot(aes(x = diagnosis, y = factor(concentration), fill = pSign)) +
   geom_tile(colour = "grey") +
   xlab("") +
   ylab("Concentration (µM)") +
-  facet_wrap(drug1 ~ drug2, scale = "free") +
+  facet_wrap(. ~ drug2, scale = "free") +
   # scale_fill_gradient2(high = "#FFFFCC", mid = "#41B6C4", low = "#0C2C84", midpoint = 0, name = "-log10(p value)") +
   scale_fill_gradient2(high = "#F44336", mid = "white", low = "#1976D2", midpoint = 0,
                        name = "-Log10(p) \nwith Direction") +
